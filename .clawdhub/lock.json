@@ -20,6 +20,10 @@
     "newsletter-digest": {
       "version": "1.0.0",
       "installedAt": 1770223103752
+    },
+    "github": {
+      "version": "1.0.0",
+      "installedAt": 1770223129021
     }
   }
 }
