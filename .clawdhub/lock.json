@@ -8,6 +8,10 @@
     "todo-tracker": {
       "version": "1.0.0",
       "installedAt": 1770222913525
+    },
+    "web-search": {
+      "version": "1.0.0",
+      "installedAt": 1770223036360
     }
   }
 }
