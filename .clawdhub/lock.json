@@ -16,6 +16,10 @@
     "weather": {
       "version": "1.0.0",
       "installedAt": 1770223085272
+    },
+    "newsletter-digest": {
+      "version": "1.0.0",
+      "installedAt": 1770223103752
     }
   }
 }
