@@ -12,6 +12,10 @@
     "web-search": {
       "version": "1.0.0",
       "installedAt": 1770223036360
+    },
+    "weather": {
+      "version": "1.0.0",
+      "installedAt": 1770223085272
     }
   }
 }
