@@ -4,6 +4,10 @@
     "remind-me": {
       "version": "2.1.0",
       "installedAt": 1770222624672
+    },
+    "todo-tracker": {
+      "version": "1.0.0",
+      "installedAt": 1770222913525
     }
   }
 }
