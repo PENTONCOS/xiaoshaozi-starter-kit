@@ -1,0 +1,19 @@
+{
+  "eventListeners": [
+    {
+      "name": "Google Calendar Checker",
+      "description": "Checks Google Calendar for today's events and sends reminders if any exist",
+      "trigger": "检查今天的Google日历事件。如果有事件，则发送包含具体事项的提醒；如果没有事件，则不做任何操作。",
+      "action": {
+        "type": "execute_script",
+        "scriptPath": "/Users/cospeyton/.openclaw/workspace/calendar_checker.js",
+        "handler": "/Users/cospeyton/.openclaw/workspace/calendar_listener.js"
+      },
+      "enabled": true,
+      "conditions": {
+        "minIntervalMinutes": 10,
+        "onlyDuringHours": [6, 22]
+      }
+    }
+  ]
+}

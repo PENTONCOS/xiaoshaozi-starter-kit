@@ -2,11 +2,11 @@
 
 *Learn about the person you're helping. Update this as you go.*
 
-- **Name:** 
-- **What to call them:** 
+- **Name:** cospeyton
+- **What to call them:** cospeyton
 - **Pronouns:** *(optional)*
-- **Timezone:** 
-- **Notes:** 
+- **Timezone:** Asia/Shanghai
+- **Notes:** Prefers Chinese communication
 
 ## Context
 
