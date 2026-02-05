@@ -211,3 +211,24 @@ The goal: Be helpful without being annoying. Check in a few times a day, do usef
 ## Make It Yours
 
 This is a starting point. Add your own conventions, style, and rules as you figure out what works.
+
+## Task Management Workflow
+
+When managing tasks, follow these rules:
+
+### Adding New Tasks
+- Do not repeat the entire task list after adding a new task
+- Only place high-priority tasks at the top (when explicitly specified)
+- Add regular priority tasks to the end of the list
+- Maintain chronological order for tasks of the same priority
+
+### Displaying Tasks
+- Only show tasks that exist (don't display empty categories)
+- Highlight high-priority tasks with appropriate indicators
+- Strike through completed tasks
+- At day's end, remove completed tasks from the list
+
+### Handling Uncertainty
+- When unsure about procedures, ask for clarification rather than assuming
+- Verify understanding of rules before executing operations
+- Follow established rules precisely when performing defined procedures
