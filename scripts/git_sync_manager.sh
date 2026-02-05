@@ -32,6 +32,7 @@ case "$1" in
         ;;
     stop)
         echo "停止 Git 每日同步..."
+        launchctl unload "$HOME/Library/LaunchAgents/$OLD_LABEL.plist" 2>/dev/null || true
         if launchctl unload "$PLIST_DEST" 2>/dev/null; then
             echo "已停止"
         else

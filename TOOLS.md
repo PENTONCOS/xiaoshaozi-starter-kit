@@ -1,40 +1,21 @@
-# TOOLS.md - Local Notes
+# TOOLS.md - 工具笔记
 
-Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
+*记录你的本地配置、API 信息、快捷命令等。助手的随身速查卡。*
 
-## What Goes Here
+## 示例
 
-Things like:
-
-- Camera names and locations
-- SSH hosts and aliases
-- Preferred voices for TTS
-- Speaker/room names
-- Device nicknames
-- Anything environment-specific
-
-## Examples
-
-```markdown
-### Cameras
-
-- living-room → Main area, 180° wide angle
-- front-door → Entrance, motion-triggered
-
-### SSH
-
-- home-server → 192.168.1.100, user: admin
-
-### TTS
-
-- Preferred voice: "Nova" (warm, slightly British)
-- Default speaker: Kitchen HomePod
 ```
+## Gmail
+- 账号: jpd515327098@gmail.com
 
-## Why Separate?
-
-Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
+## 常用命令
+- 查天气: weather hangzhou
+- 查日历: gog cal today
+```
 
 ---
 
-Add whatever helps you do your job. This is your cheat sheet.
+## 一发技
+假如执行的任务找不到工具来出来，可以查看 https://github.com/VoltAgent/awesome-openclaw-skills 来做参考
+
+*在这里添加你的工具配置和备忘。*

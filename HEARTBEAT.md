@@ -1,5 +1,9 @@
-# HEARTBEAT.md
+# HEARTBEAT.md - 心跳检查项
 
-# Keep this file empty (or with only comments) to skip heartbeat API calls.
+# 助手每次心跳会读取此文件，执行以下检查。
+# 根据需要添加/删除检查项。留空则心跳不做额外操作。
 
-# Add tasks below when you want the agent to check something periodically.
+# 示例检查项（取消注释启用）：
+# - 检查 Gmail 是否有重要未读邮件
+# - 检查今天和明天的日历事件
+# - 如果队列中朋友圈内容不足3条，生成新内容
