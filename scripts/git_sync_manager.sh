@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Git Sync Daily - 每天 12:00 执行一次同步
+# Git Sync Daily - 每天 21:00 执行一次同步
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="/Users/cospeyton/my-assistant"
@@ -15,7 +15,7 @@ mkdir -p "$LOG_DIR"
 
 case "$1" in
     start)
-        echo "启用 Git 每日同步（每天 12:00）..."
+        echo "启用 Git 每日同步（每天 21:00）..."
         if [[ ! -f "$PLIST_SRC" ]]; then
             echo "错误: 未找到 $PLIST_SRC"
             exit 1
@@ -24,7 +24,7 @@ case "$1" in
         launchctl unload "$PLIST_DEST" 2>/dev/null || true
         launchctl unload "$HOME/Library/LaunchAgents/$OLD_LABEL.plist" 2>/dev/null || true
         if launchctl load "$PLIST_DEST"; then
-            echo "已启用。下次同步时间：今天 12:00。"
+            echo "已启用。下次同步时间：今天 21:00。"
         else
             echo "启用失败"
             exit 1
@@ -46,7 +46,7 @@ case "$1" in
         ;;
     status)
         if launchctl list | grep -q "$LABEL"; then
-            echo "Git 每日同步已启用（每天 12:00 执行）"
+            echo "Git 每日同步已启用（每天 21:00 执行）"
         else
             echo "Git 每日同步未运行"
         fi
