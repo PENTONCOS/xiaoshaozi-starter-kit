@@ -159,6 +159,7 @@ You are free to edit `HEARTBEAT.md` with a short checklist or reminders. Keep it
 - **Calendar** - Upcoming events in next 24-48h?
 - **Mentions** - Twitter/social notifications?
 - **Weather** - Relevant if your human might go out?
+- **TODO list** - Check for pending tasks in TODO.md
 
 **Track your checks** in `memory/heartbeat-state.json`:
 
