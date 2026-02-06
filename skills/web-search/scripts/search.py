@@ -6,7 +6,7 @@ Search the web using DuckDuckGo's search API. Supports web search, news,
 images, and videos with various output formats.
 
 Requirements:
-    pip install duckduckgo-search
+    pip install ddgs
 """
 
 import argparse
@@ -17,11 +17,14 @@ from pathlib import Path
 from typing import List, Dict, Optional, Any
 
 try:
-    from duckduckgo_search import DDGS
-except ImportError as e:
-    print(f"Error: Missing required dependency: {e}", file=sys.stderr)
-    print("Install with: pip install duckduckgo-search", file=sys.stderr)
-    sys.exit(1)
+    from ddgs import DDGS
+except ImportError:
+    try:
+        from duckduckgo_search import DDGS
+    except ImportError as e:
+        print(f"Error: Missing required dependency: {e}", file=sys.stderr)
+        print("Install with: pip install ddgs", file=sys.stderr)
+        sys.exit(1)
 
 
 class WebSearch:
@@ -65,7 +68,7 @@ class WebSearch:
         try:
             with DDGS() as ddgs:
                 results = list(ddgs.text(
-                    keywords=query,
+                    query=query,
                     region=self.region,
                     safesearch=self.safe_search,
                     timelimit=time_range,
