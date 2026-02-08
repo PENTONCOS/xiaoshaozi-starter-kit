@@ -27,34 +27,57 @@ if [ -d "/tmp/chinese-independent-developer" ]; then
         echo "## 📈 最新项目 (2026年2月)" >> "$REPORT_PATH"
         echo "" >> "$REPORT_PATH"
         
-        # 提取2026年2月的项目
+        # 提取2026年2月的所有项目
         if grep -q "### 2026 年 2 月" /tmp/chinese-independent-developer/README.md; then
             echo "### 🎯 本周亮点项目" >> "$REPORT_PATH"
             echo "" >> "$REPORT_PATH"
             echo "| 日期 | 开发者 | 项目名称 | 领域 | 简介 | 项目链接 | 更多信息 |" >> "$REPORT_PATH"
             echo "|------|--------|----------|------|------|----------|----------|" >> "$REPORT_PATH"
             
-            # 使用grep和sed提取2026年2月的项目
-            # 先提取包含项目信息的部分
-            temp_file="/tmp/feb_projects.tmp"
+            # 提取所有2026年2月的项目，动态处理所有日期
+            # 使用awk处理整个2026年2月部分
+            temp_file="/tmp/feb_all_projects.tmp"
             > "$temp_file"
             
-            # 提取2月5日的项目
-            awk '/^### 2026 年 2 月 5 号添加/,/^### 2026 年 2 月 [0-9]+ 号添加|## 2025|### 2026 年 1 月|### 2026 年 3 月|### 2026 年 4 月|### 2026 年 5 月|### 2026 年 6 月|### 2026 年 7 月|### 2026 年 8 月|### 2026 年 9 月|### 2026 年 10 月|### 2026 年 11 月|### 2026 年 12 月/' /tmp/chinese-independent-developer/README.md > "$temp_file"
-            
-            # 处理每个项目
+            # 提取整个2026年2月部分
             awk '
-            BEGIN { current_date="2月5日"; developer="" }
-            /^#### / {
+            BEGIN { 
+                in_feb_section=0
+                current_date=""
+                developer=""
+            }
+            /^### 2026 年 2 月/ { 
+                # 提取日期信息
+                match($0, /### 2026 年 2 月 ([0-9]+) 号添加/)
+                if (RSTART > 0) {
+                    day_num = substr($0, RSTART+14, RLENGTH-15)  # Extract the day number
+                    current_date = "2月" day_num "日"
+                }
+                in_feb_section=1
+                next
+            }
+            /^### 2026 年/ && !/^### 2026 年 2 月/ { 
+                # 如果进入其他月份，退出
+                in_feb_section=0
+                exit
+            }
+            /^## 2025/ { 
+                # 如果进入其他年份，退出
+                in_feb_section=0
+                exit
+            }
+            in_feb_section && /^#### / {
                 gsub(/^#### /, "")
                 gsub(/ - \[.*\].*/, "")  # 移除 [Github]、[博客] 等链接
                 gsub(/\(.*\)/, "")       # 移除括号内的内容
                 gsub(/ $/, "")
                 gsub(/^ */, "")
+                gsub(/\r$/, "")         # 移除回车符
+                gsub(/\n$/, "")         # 移除换行符
                 developer = $0
                 next;
             }
-            /^\* :white_check_mark:/ {
+            in_feb_section && /^\* :white_check_mark:/ {
                 # 提取项目链接和名称
                 if (match($0, /\[([^\]]+)\]\(([^)]+)\)/)) {
                     project_name = substr($0, RSTART+1, RLENGTH-2)
@@ -76,135 +99,49 @@ if [ -d "/tmp/chinese-independent-developer" ]; then
                         description = substr(description, 1, RSTART-2)
                     }
                     
-                    # 确定领域
-                    category = "其他"
-                    if (description ~ /AI|人工智能|智能|ai/ || project_name ~ /AI|ai|智能/) {
-                        category = "AI"
-                    } else if (description ~ /图片|图像|photo|image/ || project_name ~ /图片|图像|photo|image/) {
-                        category = "图像处理"
-                    } else if (description ~ /视频|video/ || project_name ~ /视频|video/) {
-                        category = "视频"
-                    } else if (description ~ /工具|tool|效率|效率/ || project_name ~ /工具|tool|效率/) {
-                        category = "效率工具"
-                    }
-                    
-                    printf("| %s | **%s** | [%s](%s) | %s | %s | [🔗](%s) | %s |\n", current_date, developer, project_name, project_url, category, description, project_url, (additional_info != "" ? "[🔗](" additional_info ")" : ""))
-                }
-            }
-            ' "$temp_file" >> "$REPORT_PATH"
-            
-            # 提取2月3日的项目
-            temp_file3="/tmp/feb3_projects.tmp"
-            > "$temp_file3"
-            awk '/^### 2026 年 2 月 3 号添加/,/^### 2026 年 2 月 [0-9]+ 号添加|## 2025|### 2026 年 1 月|### 2026 年 3 月|### 2026 年 4 月|### 2026 年 5 月|### 2026 年 6 月|### 2026 年 7 月|### 2026 年 8 月|### 2026 年 9 月|### 2026 年 10 月|### 2026 年 11 月|### 2026 年 12 月/' /tmp/chinese-independent-developer/README.md > "$temp_file3"
-            
-            awk '
-            BEGIN { current_date="2月3日"; developer="" }
-            /^#### / {
-                gsub(/^#### /, "")
-                gsub(/ - \[.*\].*/, "")  # 移除 [Github]、[博客] 等链接
-                gsub(/\(.*\)/, "")       # 移除括号内的内容
-                gsub(/ $/, "")
-                gsub(/^ */, "")
-                developer = $0
-                next;
-            }
-            /^\* :white_check_mark:/ {
-                # 提取项目链接和名称
-                if (match($0, /\[([^\]]+)\]\(([^)]+)\)/)) {
-                    project_name = substr($0, RSTART+1, RLENGTH-2)
-                    project_url = substr($0, RSTART+RLENGTH+1, index(substr($0, RSTART+RLENGTH+1), ")")-1)
-                    
-                    # 提取描述
-                    desc_part = substr($0, RSTART + RLENGTH)
-                    colon_pos = index(desc_part, "：")
-                    if (colon_pos > 0) {
-                        description = substr(desc_part, colon_pos + 2)
-                    } else {
-                        description = desc_part
-                    }
-                    
-                    # 检查是否有更多信息链接
-                    additional_info = ""
-                    if (match(description, /-\ \[更多介绍\]\(([^)]+)\)/)) {
-                        additional_info = substr(description, RSTART+1, index(description, ")")-RSTART-1)
-                        description = substr(description, 1, RSTART-2)
-                    }
+                    # 移除回车符和其他控制字符
+                    gsub(/\r/, "", description)
+                    gsub(/\r/, "", project_name)
+                    gsub(/\r/, "", project_url)
+                    gsub(/\r/, "", developer)
+                    gsub(/\n/, "", description)
+                    gsub(/\n/, "", project_name)
+                    gsub(/\n/, "", project_url)
+                    gsub(/\n/, "", developer)
                     
                     # 确定领域
                     category = "其他"
-                    if (description ~ /AI|人工智能|智能|ai/ || project_name ~ /AI|ai|智能/) {
+                    if (description ~ /AI|人工智能|智能|ai|AI/ || project_name ~ /AI|ai|智能|AI/) {
                         category = "AI"
-                    } else if (description ~ /图片|图像|photo|image/ || project_name ~ /图片|图像|photo|image/) {
+                    } else if (description ~ /图片|图像|photo|image|图像处理/ || project_name ~ /图片|图像|photo|image|图像处理/) {
                         category = "图像处理"
-                    } else if (description ~ /视频|video/ || project_name ~ /视频|video/) {
+                    } else if (description ~ /视频|video|短视频/ || project_name ~ /视频|video|短视频/) {
                         category = "视频"
-                    } else if (description ~ /工具|tool|效率|效率/ || project_name ~ /工具|tool|效率/) {
+                    } else if (description ~ /工具|tool|效率|效率工具|助手|Assistant|assistant/ || project_name ~ /工具|tool|效率|效率工具|助手|Assistant|assistant/) {
                         category = "效率工具"
+                    } else if (description ~ /游戏|game/ || project_name ~ /游戏|game/) {
+                        category = "游戏"
+                    } else if (description ~ /音乐|audio|声音|voice/ || project_name ~ /音乐|audio|声音|voice/) {
+                        category = "音频"
                     }
                     
-                    printf("| %s | **%s** | [%s](%s) | %s | %s | [🔗](%s) | %s |\n", current_date, developer, project_name, project_url, category, description, project_url, (additional_info != "" ? "[🔗](" additional_info ")" : ""))
+                    printf("%s|%s|%s|%s|%s|%s\n", current_date, developer, project_name, category, description, project_url)
                 }
             }
-            ' "$temp_file3" >> "$REPORT_PATH"
+            ' /tmp/chinese-independent-developer/README.md > "$temp_file"
             
-            # 提取2月2日的项目
-            temp_file2="/tmp/feb2_projects.tmp"
-            > "$temp_file2"
-            awk '/^### 2026 年 2 月 2 号添加/,/^### 2026 年 2 月 [0-9]+ 号添加|## 2025|### 2026 年 1 月|### 2026 年 3 月|### 2026 年 4 月|### 2026 年 5 月|### 2026 年 6 月|### 2026 年 7 月|### 2026 年 8 月|### 2026 年 9 月|### 2026 年 10 月|### 2026 年 11 月|### 2026 年 12 月/' /tmp/chinese-independent-developer/README.md > "$temp_file2"
-            
-            awk '
-            BEGIN { current_date="2月2日"; developer="" }
-            /^#### / {
-                gsub(/^#### /, "")
-                gsub(/ - \[.*\].*/, "")  # 移除 [Github]、[博客] 等链接
-                gsub(/\(.*\)/, "")       # 移除括号内的内容
-                gsub(/ $/, "")
-                gsub(/^ */, "")
-                developer = $0
-                next;
-            }
-            /^\* :white_check_mark:/ {
-                # 提取项目链接和名称
-                if (match($0, /\[([^\]]+)\]\(([^)]+)\)/)) {
-                    project_name = substr($0, RSTART+1, RLENGTH-2)
-                    project_url = substr($0, RSTART+RLENGTH+1, index(substr($0, RSTART+RLENGTH+1), ")")-1)
-                    
-                    # 提取描述
-                    desc_part = substr($0, RSTART + RLENGTH)
-                    colon_pos = index(desc_part, "：")
-                    if (colon_pos > 0) {
-                        description = substr(desc_part, colon_pos + 2)
-                    } else {
-                        description = desc_part
-                    }
-                    
-                    # 检查是否有更多信息链接
-                    additional_info = ""
-                    if (match(description, /-\ \[更多介绍\]\(([^)]+)\)/)) {
-                        additional_info = substr(description, RSTART+1, index(description, ")")-RSTART-1)
-                        description = substr(description, 1, RSTART-2)
-                    }
-                    
-                    # 确定领域
-                    category = "其他"
-                    if (description ~ /AI|人工智能|智能|ai/ || project_name ~ /AI|ai|智能/) {
-                        category = "AI"
-                    } else if (description ~ /图片|图像|photo|image/ || project_name ~ /图片|图像|photo|image/) {
-                        category = "图像处理"
-                    } else if (description ~ /视频|video/ || project_name ~ /视频|video/) {
-                        category = "视频"
-                    } else if (description ~ /工具|tool|效率|效率/ || project_name ~ /工具|tool|效率/) {
-                        category = "效率工具"
-                    }
-                    
-                    printf("| %s | **%s** | [%s](%s) | %s | %s | [🔗](%s) | %s |\n", current_date, developer, project_name, project_url, category, description, project_url, (additional_info != "" ? "[🔗](" additional_info ")" : ""))
-                }
-            }
-            ' "$temp_file2" >> "$REPORT_PATH"
+            # 处理临时文件，生成表格
+            while IFS='|' read -r date dev name cat desc url; do
+                if [[ -n "$date" ]]; then
+                    # 转义特殊字符
+                    name_escaped=$(printf '%s\n' "$name" | sed 's/[[\.*^$()+?{|]/\\&/g')
+                    desc_escaped=$(printf '%s\n' "$desc" | sed 's/[[\.*^$()+?{|]/\\&/g')
+                    printf '| %s | **%s** | [%s](%s) | %s | %s | [🔗](%s) | |\n' "$date" "$dev" "$name" "$url" "$cat" "$desc" "$url" >> "$REPORT_PATH"
+                fi
+            done < "$temp_file"
             
             # 清理临时文件
-            rm -f "$temp_file" "$temp_file2" "$temp_file3"
+            rm -f "$temp_file"
         fi
         
         # 提取其他2026年项目（1月）
@@ -251,6 +188,53 @@ if [ -d "/tmp/chinese-independent-developer" ]; then
             ' /tmp/chinese-independent-developer/README.md >> "$REPORT_PATH"
             echo "" >> "$REPORT_PATH"
         fi
+        
+        # 提取其他2026年项目（其他月份）
+        for month in {3..12}; do  # 从3月到12月
+            if grep -q "### 2026 年 $month 月" /tmp/chinese-independent-developer/README.md; then
+                echo "### 2026年$month 月新增项目" >> "$REPORT_PATH"
+                echo "" >> "$REPORT_PATH"
+                
+                # 使用awk提取特定月份的内容
+                awk -v m="$month" '
+                BEGIN { in_section=0; developer="" }
+                /^### 2026 年 '"$month"' 月/ { 
+                    in_section=1; 
+                    next 
+                }
+                /^### 2026 年/ && !/^### 2026 年 '"$month"' 月/ { in_section=0; exit }
+                /^### 2025 年/ { in_section=0; exit }
+                in_section { 
+                    if (/^#### /) {
+                        gsub(/^#### /, "")
+                        gsub(/ - \[.*\].*/, "")
+                        gsub(/\(.*\)/, "")
+                        gsub(/ $/, "")
+                        gsub(/^ */, "")
+                        developer = $0
+                    } else if (/^\* :white_check_mark:/) {
+                        if (match($0, /\[([^\]]+)\]\(([^)]+)\)/)) {
+                            project_name = substr($0, RSTART+1, RLENGTH-2)
+                            project_url = substr($0, RSTART+RLENGTH+1, index(substr($0, RSTART+RLENGTH+1), ")")-1)
+                            
+                            desc_part = substr($0, RSTART + RLENGTH)
+                            colon_pos = index(desc_part, "：")
+                            if (colon_pos > 0) {
+                                description = substr(desc_part, colon_pos + 2)
+                            } else {
+                                description = desc_part
+                            }
+                            
+                            print "* **" developer "** - [" project_name "](" project_url ")： " description
+                        }
+                    } else if ($0 ~ /^[^*#]/ && $0 != "" && $0 !~ /^#### /) {
+                        print $0
+                    }
+                }
+                ' /tmp/chinese-independent-developer/README.md >> "$REPORT_PATH"
+                echo "" >> "$REPORT_PATH"
+            fi
+        done
     fi
 
     # 提取2025年项目
