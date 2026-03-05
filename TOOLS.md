@@ -1,21 +1,16 @@
-# TOOLS.md - 工具笔记
+# 已安装技能
 
-*记录你的本地配置、API 信息、快捷命令等。助手的随身速查卡。*
+## 搜索类
+- ddg-search - DuckDuckGo 网页搜索（免费，无需 API key）
 
-## 示例
-
-```
-## Gmail
-- 账号: jpd515327098@gmail.com
-
-## 常用命令
-- 查天气: weather hangzhou
-- 查日历: gog cal today
-```
+## 待安装
+- ~~web-search~~ - Brave Search（需要 API key，暂不安装）
 
 ---
 
-## 一发技
-假如执行的任务找不到工具来出来，可以查看 https://github.com/VoltAgent/awesome-openclaw-skills 来做参考
+## 配置说明
 
-*在这里添加你的工具配置和备忘。*
+### DuckDuckGo Search
+- 状态：✅ 可用
+- 位置：/Users/cospeyton/.openclaw/skills/ddg-search/
+- 使用：直接使用 `web_search` 工具即可
