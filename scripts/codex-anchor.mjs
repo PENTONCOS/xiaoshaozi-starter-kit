@@ -183,7 +183,7 @@ function recordSample(st, snap) {
     const winKey = `w|${p.resets_at}`;
     st.peaks[winKey] = Math.max(st.peaks[winKey] ?? 0, p.used_percent);
     const keys = Object.keys(st.peaks);
-    if (keys.length > 4) keys.sort((a, b) => Number(a.split("|")[1]) - Number(b[1].split("|")[1])).slice(0, keys.length - 4).forEach((k) => delete st.peaks[k]);
+    if (keys.length > 4) keys.sort((a, b) => Number(a.split("|")[1]) - Number(b.split("|")[1])).slice(0, keys.length - 4).forEach((k) => delete st.peaks[k]);
   }
   // prune >6h and cap
   const cutoff = now() - 6 * 3.6e6;
