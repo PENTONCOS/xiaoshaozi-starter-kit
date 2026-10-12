@@ -1,26 +1,24 @@
 #!/usr/bin/env node
 // codex-anchor — Codex 5h 窗口锚定 + 余量监控. Zero-LLM (仅 spawn codex CLI 探测).
 //
-// morning  : 工作日 09:00 / 14:00 发一次最小探测请求锚定 5h 窗口，
-//            然后读最新快照，推私聊日报卡（5h/周窗口、Credits、上一窗口峰值、ΔCredits）。
-// monitor  : 每 10 分钟（工作日 09-20 点内）缓存读最新 rollout 快照（零请求），
+// morning  : 每天 09:00 / 14:05 发一次最小探测请求锚定 5h 窗口，
+//            然后读最新快照，推日报卡到通知群（5h/周窗口、Credits、上一窗口峰值、ΔCredits）。
+// monitor  : 每 10 分钟（24/7 全天候）缓存读最新 rollout 快照（零请求），
 //            80%/95% 每窗口各告警一次；30 分钟内涨幅 ≥25pp 触发燃烧过快告警（45min 冷却）。
 // 失败处理 : probe 失败自动重试 1 次，仍失败走告警路由（告警群），失败卡冷却 1h。
 // 数据来源 : ~/.codex/sessions/**/*.jsonl 内的 rate_limits（每次真实 codex 运行免费写入）。
-// 路由     : 额度属个人数据 → 日报/余量告警一律私聊（主 bot 直发 MAIN_DM）；
-//            脚本失败卡 → 共享告警路由（getSender "alert"）。
+// 路由     : 日报卡 → 通知群（getSender "push"）；余量/燃烧过快/失败卡 → 告警群（getSender "alert"）。
+// 调度     : 24/7，不区分工作日与时段（2026-10-12 定案）。
 
 import { readdirSync, statSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
-import { getTenantToken, sendCard, getSender } from "/Users/cospeyton/notify/feishu-notify.mjs";
+import { getSender } from "/Users/cospeyton/notify/feishu-notify.mjs";
 
 const SESSIONS = join(homedir(), ".codex/sessions");
 const STATE_PATH = join(homedir(), "my-assistant/state/codex-anchor-state.json");
 const LOG_TAG = "[codex-anchor]";
-const MAIN_DM = "ou_93d7f79abd93ec4c91602d86de65be08";
-const OPENCLAW_CFG = join(homedir(), ".openclaw/openclaw.json");
 const BURN_WINDOW_MIN = 30;     // 燃烧速率观察窗
 const BURN_JUMP_PP = 25;        // 30min 内涨 25 个百分点 → 燃烧过快
 const BURN_COOLDOWN_MS = 45 * 60 * 1000;
@@ -109,21 +107,17 @@ async function probeWithRetry() {
 }
 
 // ---------- feishu ----------
-async function mainBotCreds() {
-  const cfg = JSON.parse(readFileSync(OPENCLAW_CFG, "utf8"));
-  const main = cfg?.channels?.feishu?.accounts?.main;
-  if (!main?.appId || !main?.appSecret) throw new Error("feishu appId/appSecret missing");
-  return { appId: main.appId, appSecret: main.appSecret };
+async function sendPush(card) { // 日报卡 → 通知群
+  const { send } = await getSender("codex-anchor", "push");
+  return send(card);
 }
-async function sendDm(card) {
-  const creds = await mainBotCreds();
-  const token = await getTenantToken(creds);
-  return sendCard(token, card, { targetId: MAIN_DM, targetType: "open_id" });
+async function sendAlert(card) { // 余量/燃烧过快 → 告警群
+  const { send } = await getSender("codex-anchor", "alert");
+  return send(card);
 }
 async function sendFailureCard(text) {
   try {
-    const { send } = await getSender("codex-anchor", "alert");
-    await send({ header: { template: "red", title: { tag: "plain_text", content: "🚨 Codex 锚定脚本失败" } }, elements: [{ tag: "markdown", content: esc(text) }] });
+    await sendAlert({ header: { template: "red", title: { tag: "plain_text", content: "🚨 Codex 锚定脚本失败" } }, elements: [{ tag: "markdown", content: esc(text) }] });
   } catch (e) { log("failure card also failed:", e.message); }
 }
 
@@ -169,7 +163,7 @@ async function morning() {
   const p = snap.rl.primary;
   const anchored = p ? (p.used_percent === 0 || p.resets_at * 1000 - snap.ts >= 4.8 * 3.6e6) : false; // 新鲜锚定：0% 或重置点距快照≈满 5h
   recordSample(st, snap);
-  await sendDm(buildDailyCard(snap.rl, snap.ts, st, anchored));
+  await sendPush(buildDailyCard(snap.rl, snap.ts, st, anchored));
   saveState(st);
   log("morning card sent", anchored ? "(anchored)" : "(in-window)");
 }
@@ -196,12 +190,7 @@ function recordSample(st, snap) {
 }
 
 async function monitor() {
-  // weekday/time guard: Mon-Fri 09:00-20:00 CST
-  const parts = new Date().toLocaleString("en-US", { timeZone: BEIJING, weekday: "short", hour: "numeric", hour12: false }).split(", ");
-  const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(parts[0]);
-  const hr = Number(parts[1]);
-  if (wd <= 0 || wd >= 6 || hr < 9 || hr >= 20) { log("outside guard window, skip"); return; }
-
+  // 24/7：不区分工作日与时段，缓存读快照零请求
   const snap = readSnapshot();
   if (!snap) { log("no snapshot yet"); return; }
   const st = loadState();
@@ -241,7 +230,7 @@ async function monitor() {
   if (wk.length > 4) wk.sort((a, b) => Number(a.split("|")[1]) - Number(b.split("|")[1])).slice(0, wk.length - 4).forEach((k) => delete st.windowAlerts[k]);
 
   saveState(st);
-  if (card) { await sendDm(card); log("alert sent:", card.header.title.content); }
+  if (card) { await sendAlert(card); log("alert sent:", card.header.title.content); }
   else log(`monitor ok: ${p.used_percent}%`);
 }
 
