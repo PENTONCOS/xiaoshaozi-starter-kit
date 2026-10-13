@@ -315,7 +315,16 @@ async function monitor() {
         st.burnLast = now();
         const minsLeft = (p.resets_at * 1000 - now()) / 6e4;
         const proj = minsLeft > 0 ? Math.min(100, Math.round(last.p5 + (jump / BURN_WINDOW_MIN) * Math.min(minsLeft, 300))) : last.p5;
-        card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 消耗过快" } }, elements: [{ tag: "markdown", content: `${base}\n近 ${BURN_WINDOW_MIN} 分钟涨 **${jump}pp**｜按此速率到重置预计 **${proj}%**` }] };
+        const remainPp = 100 - last.p5;
+        const exhaustMin = jump > 0 ? remainPp / (jump / BURN_WINDOW_MIN) : Infinity;
+        let tail;
+        if (minsLeft > 0 && exhaustMin < minsLeft) {
+          const rec30 = Math.max(1, Math.floor((remainPp / minsLeft) * BURN_WINDOW_MIN));
+          tail = `照此速度约 **${fmtT(now() + exhaustMin * 6e4)}** 就会用光（早于 ${fmtT(p.resets_at * 1000)} 刷新）\n想撑到刷新：把速度压到 ≤ **${rec30}pp/30min**（现在 ${Math.round(jump)}pp/30min）`;
+        } else {
+          tail = `按此速率到重置预计 **${proj}%**（不会用光）`;
+        }
+        card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 消耗过快" } }, elements: [{ tag: "markdown", content: `${base}\n近 ${BURN_WINDOW_MIN} 分钟涨 **${jump}pp**｜${tail}` }] };
       }
     }
   }
@@ -344,7 +353,17 @@ async function monitor() {
           st.wkBurnLast = now();
           const wDaysLeft = Math.max(0.01, (sw.resets_at * 1000 - now()) / 864e5);
           const wProj = Math.min(100, Math.round(sw.used_percent + wJump * 8 * wDaysLeft));
-          card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 周额度消耗过快" } }, elements: [{ tag: "markdown", content: wBase + "\n近 3 小时涨 **" + wJump + "pp**｜按此速率到重置预计 **" + wProj + "%**" }] };
+          const wPerDay = wJump * 8;
+          const wRemain = 100 - sw.used_percent;
+          const wExhaustDays = wPerDay > 0 ? wRemain / wPerDay : Infinity;
+          let wTail;
+          if (wExhaustDays < wDaysLeft) {
+            const recDay = Math.max(1, Math.floor(wRemain / wDaysLeft));
+            wTail = "照此速度约 **" + fmtDT(now() + wExhaustDays * 864e5) + "** 就会用光（早于 " + fmtDT(sw.resets_at * 1000) + " 刷新）\n想撑到刷新：把日耗压到 ≤ **" + recDay + "pp/天**（现在约 " + Math.round(wPerDay) + "pp/天）";
+          } else {
+            wTail = "按此速率到重置预计 **" + wProj + "%**（不会用光）";
+          }
+          card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 周额度消耗过快" } }, elements: [{ tag: "markdown", content: wBase + "\n近 3 小时涨 **" + wJump + "pp**｜" + wTail }] };
         }
       }
     }
