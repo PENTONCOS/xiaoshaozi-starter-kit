@@ -10,7 +10,8 @@
 //            60/80/95% 每窗口各告警一次；30min 涨 ≥15pp 触发燃烧过快告警（45min 冷却）；周窗口 50/75/90%。
 // 失败处理 : probe 失败自动重试 1 次，仍失败走告警路由（告警群），失败卡冷却 1h。
 // 数据来源 : opencodex quota API（127.0.0.1:10100，零额度观测）；rollout 快照兜底。
-// 路由     : 状态卡 / 重置卡被使用 / Credits 被消耗 / 重置卡到期提醒 → 通知群（getSender "push"）；
+// 路由     : 状态卡 / 重置卡被使用 / 重置卡到期提醒 → 通知群（getSender "push"）；
+//            Credits 被消耗 → 通知群 + 告警群（2026-10-13 用户定案：这张也进告警群）；
 //            余量/燃烧过快/失败卡 → 告警群（getSender "alert"）。
 // 到期提醒 : 监控每轮读 reset-credits，最近一张卡 ≤7 天到期且未提醒过 → 单独推一条（按 expires_at 去重）。
 // 调度     : monitor 24/7 每 10 分钟；不区分工作日与时段（2026-10-12 定案）。
@@ -301,7 +302,8 @@ function usageEvents(st, snap) {
     else {
       const d = st.seenCredits - cr;
       if (d >= 0.001) {
-        out.push({ title: "💳 Codex Credits 被消耗", body: `Credits 被消耗 **$${d.toFixed(4)}**｜余额 **$${cr.toFixed(2)}**` });
+        // alert:true → 这张除通知群外，额外推一份到告警群（2026-10-13 用户定案）
+        out.push({ title: "💳 Codex Credits 被消耗", body: `Credits 被消耗 **$${d.toFixed(4)}**｜余额 **$${cr.toFixed(2)}**`, alert: true });
         st.seenCredits = cr;
       } else if (d < 0) st.seenCredits = cr; // 充值/回补：静默同步
     }
@@ -336,17 +338,25 @@ async function maybeAutoAnchor(st, snap) {
   log(ok ? "auto-anchor: probe done, window claimed" : "auto-anchor: probe failed");
   return ok;
 }
+function usageCard(items) {
+  return {
+    header: { template: "blue", title: { tag: "plain_text", content: (process.env.USAGE_TEST === "1" ? "【测试】" : "") + (items.length > 1 ? `💳 Codex 额度变动（${items.length} 条）` : items[0].title) } },
+    elements: items.map((it) => ({ tag: "markdown", content: `**${it.title}**\n${it.body}` })),
+  };
+}
 async function flushUsage(st, fresh) {
   const items = [...(st.pendingUsage || []), ...fresh];
   if (!items.length) return;
   if (inQuietHours()) { st.pendingUsage = items; log("usage notify queued (quiet hours):", items.length); return; }
   st.pendingUsage = [];
-  const card = {
-    header: { template: "blue", title: { tag: "plain_text", content: (process.env.USAGE_TEST === "1" ? "【测试】" : "") + (items.length > 1 ? `💳 Codex 额度变动（${items.length} 条）` : items[0].title) } },
-    elements: items.map((it) => ({ tag: "markdown", content: `**${it.title}**\n${it.body}` })),
-  };
-  try { await sendPush(card); log("usage notify sent:", items.map((i) => i.title).join(" / ")); }
-  catch (e) { st.pendingUsage = items; log("usage notify failed, requeued:", e.message); }
+  try { await sendPush(usageCard(items)); log("usage notify sent:", items.map((i) => i.title).join(" / ")); }
+  catch (e) { st.pendingUsage = items; log("usage notify failed, requeued:", e.message); return; }
+  // item.alert 的条目额外推一份到告警群（2026-10-13 用户定案：Credits 消耗也进告警群）
+  const alertItems = items.filter((it) => it.alert);
+  if (alertItems.length) {
+    try { await sendAlert(usageCard(alertItems)); log("usage alert sent:", alertItems.map((i) => i.title).join(" / ")); }
+    catch (e) { log("usage alert failed:", e.message); }
+  }
 }
 
 // 重置卡到期提醒卡（独立推送，不含在状态卡里——用户定案 2026-10-13）
