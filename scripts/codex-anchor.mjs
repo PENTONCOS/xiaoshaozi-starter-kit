@@ -350,7 +350,7 @@ async function maybeExpiryReminder(st) {
 // ---------- sampling & alerts ----------
 function recordSample(st, snap) {
   const p = snap.rl.primary, s = snap.rl.secondary;
-  st.samples.push({ t: snap.ts, p5: p?.used_percent ?? null, pw: s?.used_percent ?? null, cr: snap.rl.credits?.has_credits ? Number(snap.rl.credits.balance) : null });
+  st.samples.push({ t: snap.ts, p5: p?.used_percent ?? null, w5: p?.resets_at ?? null, pw: s?.used_percent ?? null, ww: s?.resets_at ?? null, cr: snap.rl.credits?.has_credits ? Number(snap.rl.credits.balance) : null });
   // per-window peak tracking (key: resets_at of the window the sample belongs to)
   if (p) {
     const winKey = `w|${p.resets_at}`;
@@ -413,7 +413,7 @@ async function monitor() {
   }
 
   if (!card && now() - st.burnLast > BURN_COOLDOWN_MS) {
-    const recent = st.samples.filter((x) => x.t >= now() - BURN_WINDOW_MIN * 6e4 && x.p5 != null);
+    const recent = st.samples.filter((x) => x.t >= now() - BURN_WINDOW_MIN * 6e4 && x.p5 != null && x.w5 === p.resets_at); // 仅同窗口：跨重置取样本会把真实爬升稀释（重置后 first 可能拿到重置前高值）
     if (recent.length >= 2) {
       const first = recent[0], last = recent[recent.length - 1];
       const jump = last.p5 - first.p5;
@@ -443,7 +443,7 @@ async function monitor() {
       }
     }
     if (!card && now() - (st.wkBurnLast || 0) > 6 * 3.6e6) {
-      const wRecent = st.samples.filter((x) => x.t >= now() - 3 * 3.6e6 && x.pw != null);
+      const wRecent = st.samples.filter((x) => x.t >= now() - 3 * 3.6e6 && x.pw != null && x.ww === sw.resets_at); // 仅同周窗口
       if (wRecent.length >= 2) {
         const wJump = wRecent[wRecent.length - 1].pw - wRecent[0].pw;
         if (wJump >= 10) {
