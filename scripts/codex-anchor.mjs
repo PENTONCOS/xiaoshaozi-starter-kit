@@ -136,7 +136,8 @@ async function sendFailureCard(text) {
 function remainStr(resetsSec) {
   const ms = resetsSec * 1000 - now();
   if (ms <= 0) return "已过期";
-  const h = Math.floor(ms / 3.6e6), m = Math.round((ms % 3.6e6) / 6e4);
+  const totalMin = Math.max(0, Math.round(ms / 6e4)); // 先归整到分钟：锚定后 reset−now ≈ 5h−ε 会被误算成「4h60m」
+  const h = Math.floor(totalMin / 60), m = totalMin % 60;
   return h > 0 ? `还剩 ${h}h${m}m` : `还剩 ${m}m`;
 }
 // 5h 燃烧外推：何时用光 + 建议压到多少（留 SAFE_RESERVE_PP% 余量）
