@@ -27,6 +27,7 @@ const LOG_TAG = "[codex-anchor]";
 const BURN_WINDOW_MIN = 30;     // 燃烧速率观察窗
 const BURN_JUMP_PP = 15;        // 30min 内涨 15 个百分点 → 燃烧过快
 const SAFE_RESERVE_PP = 10;     // 安全余量：建议速度按「到重置留 10% 不用光」计算
+const PRE_WARN_PP = 75;         // 5h 提前哨档位（2026-10-13 用户从 60 提到 75）
 const BURN_COOLDOWN_MS = 45 * 60 * 1000;
 const FAIL_COOLDOWN_MS = 60 * 60 * 1000;
 const AUTO_PROBE_FROM = 9, AUTO_PROBE_TO = 21; // 自动补锚时段（北京时间）
@@ -399,6 +400,16 @@ async function monitor() {
   const snapAgeMin = Math.round((now() - snap.ts) / 6e4);
   if (src === "rollout" && snapAgeMin > 60) { log("stale rollout snapshot " + snapAgeMin + "m, skip"); return; }
   const st = loadState();
+  // 迁移（2026-10-13）：提前哨 60%→75%；已报过更高级别时低级别一并标记，避免升级/跳档后重报一条
+  for (const k of Object.keys(st.windowAlerts || {})) {
+    const a = st.windowAlerts[k];
+    if (!Array.isArray(a) || !a.length) continue;
+    const s = new Set(a.map((x) => (x === "60" ? String(PRE_WARN_PP) : x)));
+    const nums = [...s].map(Number).filter(Number.isFinite);
+    const top = nums.length ? Math.max(...nums) : -1;
+    for (const v of [PRE_WARN_PP, 80, 95]) if (v <= top) s.add(String(v));
+    st.windowAlerts[k] = [...s];
+  }
   // 空闲窗口自动补锚（09:00–21:00）：重置/到期只清零不锚定，补一次请求把窗口锚在当下
   const anchored = await maybeAutoAnchor(st, snap);
   if (anchored) {
@@ -423,15 +434,16 @@ async function monitor() {
   let card = null;
 
   const base = `5h 窗口已用 **${p.used_percent}%**（${fmtT(p.resets_at * 1000)} 重置，${remainStr(p.resets_at)}）`;
+  const mark5h = (lv) => { for (const v of [PRE_WARN_PP, 80, 95]) if (v <= lv && !alerted.includes(String(v))) alerted.push(String(v)); }; // 报高级别时把更低的闸一并标记，避免跳档后补报一条
   if (p.used_percent >= 95 && !alerted.includes("95")) {
-    alerted.push("95"); card = { header: { template: "red", title: { tag: "plain_text", content: "🔴 Codex 5h 窗口 95%" } }, elements: [{ tag: "markdown", content: `${base}\n周窗口 ${snap.rl.secondary?.used_percent ?? "?"}%` }] };
+    mark5h(95); card = { header: { template: "red", title: { tag: "plain_text", content: "🔴 Codex 5h 窗口 95%" } }, elements: [{ tag: "markdown", content: `${base}\n周窗口 ${snap.rl.secondary?.used_percent ?? "?"}%` }] };
   } else if (p.used_percent >= 80 && !alerted.includes("80")) {
-    alerted.push("80"); card = { header: { template: "orange", title: { tag: "plain_text", content: "🟠 Codex 5h 窗口 80%" } }, elements: [{ tag: "markdown", content: `${base}\n周窗口 ${snap.rl.secondary?.used_percent ?? "?"}%` }] };
+    mark5h(80); card = { header: { template: "orange", title: { tag: "plain_text", content: "🟠 Codex 5h 窗口 80%" } }, elements: [{ tag: "markdown", content: `${base}\n周窗口 ${snap.rl.secondary?.used_percent ?? "?"}%` }] };
   }
 
-  // burn rate: Δpct within last 30min ≥ 25pp
-  if (!card && p.used_percent >= 60 && !alerted.includes("60")) {
-    alerted.push("60"); card = { header: { template: "yellow", title: { tag: "plain_text", content: "🟡 Codex 5h 窗口 60%" } }, elements: [{ tag: "markdown", content: base + "\n周窗口 " + (snap.rl.secondary?.used_percent ?? "?") + "%" }] };
+  // 提前哨：5h 用量越 PRE_WARN_PP（默认 75%）先报一条，每窗口一次
+  if (!card && p.used_percent >= PRE_WARN_PP && !alerted.includes(String(PRE_WARN_PP))) {
+    mark5h(PRE_WARN_PP); card = { header: { template: "yellow", title: { tag: "plain_text", content: `🟡 Codex 5h 窗口 ${PRE_WARN_PP}%` } }, elements: [{ tag: "markdown", content: base + "\n周窗口 " + (snap.rl.secondary?.used_percent ?? "?") + "%" }] };
   }
 
   if (!card && now() - st.burnLast > BURN_COOLDOWN_MS) {
