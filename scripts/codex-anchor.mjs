@@ -8,6 +8,7 @@
 // 失败处理 : probe 失败自动重试 1 次，仍失败走告警路由（告警群），失败卡冷却 1h。
 // 数据来源 : ~/.codex/sessions/**/*.jsonl 内的 rate_limits（每次真实 codex 运行免费写入）。
 // 路由     : 日报卡 → 通知群（getSender "push"）；余量/燃烧过快/失败卡 → 告警群（getSender "alert"）。
+//            重置卡被使用 / Credits 被消耗 → 通知群（零 LLM，读 quota API 的 resetCredits / credits.balance）。
 // 调度     : 24/7，不区分工作日与时段（2026-10-12 定案）。
 
 import { readdirSync, statSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
@@ -164,7 +165,7 @@ function ocxSnap(j) {
     secondary: q.weeklyPercent != null && q.weeklyResetAt ? { used_percent: q.weeklyPercent, resets_at: q.weeklyResetAt } : null,
     credits: { has_credits: bal != null, balance: bal },
   };
-  return { rl, ts: now(), updatedAt: q.updatedAt || null };
+  return { rl, ts: now(), updatedAt: q.updatedAt || null, resetCredits: q.resetCredits ?? null };
 }
 async function fetchOcxQuota(allowRefresh) {
   const token = ocxToken();
@@ -181,8 +182,52 @@ async function fetchOcxQuota(allowRefresh) {
         if (r2.ok) { const s2 = ocxSnap(await r2.json()); if (s2) snap = s2; }
       } catch { /* refresh is best-effort, observational for raw admin */ }
     }
-    return snap && snap.rl && snap.rl.primary ? snap : null;
+    return snap && snap.rl ? snap : null;
   } catch { return null; }
+}
+
+// ---------- usage-change notifications -> 通知群 (zero-LLM) ----------
+function usageEvents(st, snap) {
+  const out = [];
+  const rc = snap.resetCredits;
+  if (rc != null) {
+    if (st.seenResetCredits == null) st.seenResetCredits = rc;
+    else if (rc < st.seenResetCredits) {
+      out.push({
+        title: "🔄 Codex 重置卡被使用",
+        body: `重置卡被使用 **${st.seenResetCredits - rc}** 张｜剩余 **${rc}** 张\n5h 窗口 ${snap.rl.primary?.used_percent ?? "?"}%｜周窗口 ${snap.rl.secondary?.used_percent ?? "?"}%`,
+      });
+      st.seenResetCredits = rc;
+    } else if (rc > st.seenResetCredits) st.seenResetCredits = rc; // 新发卡：静默同步
+  }
+  const cr = snap.rl.credits?.has_credits ? Number(snap.rl.credits.balance) : null;
+  if (cr != null) {
+    if (st.seenCredits == null) st.seenCredits = cr;
+    else {
+      const d = st.seenCredits - cr;
+      if (d >= 0.001) {
+        out.push({ title: "💳 Codex Credits 被消耗", body: `Credits 被消耗 **$${d.toFixed(4)}**｜余额 **$${cr.toFixed(2)}**` });
+        st.seenCredits = cr;
+      } else if (d < 0) st.seenCredits = cr; // 充值/回补：静默同步
+    }
+  }
+  return out;
+}
+function inQuietHours() {
+  const h = Number(new Intl.DateTimeFormat("en-US", { timeZone: BEIJING, hour: "2-digit", hour12: false }).format(new Date()));
+  return h >= 23 || h < 8;
+}
+async function flushUsage(st, fresh) {
+  const items = [...(st.pendingUsage || []), ...fresh];
+  if (!items.length) return;
+  if (inQuietHours()) { st.pendingUsage = items; log("usage notify queued (quiet hours):", items.length); return; }
+  st.pendingUsage = [];
+  const card = {
+    header: { template: "blue", title: { tag: "plain_text", content: (process.env.USAGE_TEST === "1" ? "【测试】" : "") + (items.length > 1 ? `💳 Codex 额度变动（${items.length} 条）` : items[0].title) } },
+    elements: items.map((it) => ({ tag: "markdown", content: `**${it.title}**\n${it.body}` })),
+  };
+  try { await sendPush(card); log("usage notify sent:", items.map((i) => i.title).join(" / ")); }
+  catch (e) { st.pendingUsage = items; log("usage notify failed, requeued:", e.message); }
 }
 
 // ---------- morning ----------
@@ -236,6 +281,9 @@ async function monitor() {
   if (src === "rollout" && snapAgeMin > 60) { log("stale rollout snapshot " + snapAgeMin + "m, skip"); return; }
   const st = loadState();
   recordSample(st, snap);
+  const freshEvents = usageEvents(st, snap);
+  if (process.env.USAGE_TEST === "1") freshEvents.push({ title: "🔄 Codex 重置卡被使用", body: "（自检）模拟消耗 1 张｜剩余 3 张" });
+  await flushUsage(st, freshEvents);
   const p = snap.rl.primary;
   if (!p) { saveState(st); return; }
   const winKey = `w|${p.resets_at}`;

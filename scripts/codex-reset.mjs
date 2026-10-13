@@ -1,0 +1,145 @@
+#!/usr/bin/env node
+// codex-reset — 手动消耗 Codex 重置卡（reset credit）+ 推【通知】群。
+//
+//   node codex-reset.mjs                    # 只读：当前额度 + 剩余重置卡
+//   node codex-reset.mjs --consume --yes    # 消耗 1 张（不可逆，必须显式 --yes）
+//   node codex-reset.mjs --json             # JSON 输出
+//
+// 安全：默认只读；只有 --consume --yes 才真正消耗。绝不挂调度、绝不由脚本自动执行——
+//       仅当用户明确要求重置时才运行（用户 2026-10-13 定案：「帮我重置，但不能主动使用」）。
+// 依赖：本机 opencodex (127.0.0.1:10100) 运行中 + ~/.opencodex/admin-api-token。
+// 通知：重置结果推【通知】群（getSender("codex-anchor","push")），并同步 state 基线，
+//       防止 monitor 在下一个采样周期对同一次消耗重复播报。
+
+import { readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { getSender } from "/Users/cospeyton/notify/feishu-notify.mjs";
+
+const BASE = "http://127.0.0.1:10100";
+const STATE_PATH = join(homedir(), "my-assistant/state/codex-anchor-state.json");
+const BEIJING = "Asia/Shanghai";
+const args = process.argv.slice(2);
+const wantConsume = args.includes("--consume");
+const hasYes = args.includes("--yes");
+const asJson = args.includes("--json");
+const log = (...a) => console.log(...a);
+const sleep = (ms) => new Promise((s) => setTimeout(s, ms));
+const fmtT = (ts) => new Date(ts).toLocaleString("zh-CN", { timeZone: BEIJING, hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+function token() {
+  try { return readFileSync(join(homedir(), ".opencodex/admin-api-token"), "utf8").trim(); } catch { return ""; }
+}
+const H = () => ({ Authorization: "Bearer " + token(), "Content-Type": "application/json" });
+
+async function getQuota() {
+  const r = await fetch(BASE + "/api/codex-auth/quota", { headers: H(), signal: AbortSignal.timeout(8000) });
+  if (!r.ok) throw new Error("quota HTTP " + r.status);
+  const qs = (await r.json()).quotas || {};
+  const key = qs.__main__ ? "__main__" : Object.keys(qs)[0];
+  return { accountId: key, q: qs[key] };
+}
+async function getResetCredits(accountId) {
+  const r = await fetch(BASE + "/api/codex-auth/reset-credits?accountId=" + encodeURIComponent(accountId), { headers: H(), signal: AbortSignal.timeout(20000) });
+  if (!r.ok) throw new Error("reset-credits HTTP " + r.status);
+  return r.json();
+}
+async function refresh() {
+  try { await fetch(BASE + "/api/codex-auth/accounts/refresh", { method: "POST", headers: H(), signal: AbortSignal.timeout(20000) }); } catch { /* best-effort */ }
+}
+async function consume(accountId, operationId) {
+  for (let i = 0; i < 3; i++) {
+    let r;
+    try {
+      r = await fetch(BASE + "/api/codex-auth/reset-credits/consume", {
+        method: "POST", headers: H(),
+        body: JSON.stringify({ accountId, operationId }),
+        signal: AbortSignal.timeout(30000),
+      });
+    } catch (e) { if (i < 2) { await sleep(2000); continue; } throw e; }
+    if (r.status === 503) { await sleep(2000); continue; } // server_busy：重试同一 operationId（幂等）
+    const body = await r.json().catch(() => ({}));
+    return { status: r.status, body };
+  }
+  return { status: 503, body: { error: "server_busy" } };
+}
+function syncState(q) {
+  try {
+    const st = JSON.parse(readFileSync(STATE_PATH, "utf8"));
+    if (q && q.resetCredits != null) st.seenResetCredits = q.resetCredits;
+    if (q && q.credits && q.credits.balance != null) st.seenCredits = Number(q.credits.balance);
+    writeFileSync(STATE_PATH, JSON.stringify(st));
+  } catch (e) { log("[warn] state sync skipped:", e.message); }
+}
+async function notify(card) {
+  const { send } = await getSender("codex-anchor", "push");
+  return send(card);
+}
+
+function statusText(accountId, q, rc) {
+  const short = q ? q.shortPercent : "?";
+  const weekly = q ? q.weeklyPercent : "?";
+  const bal = q && q.credits && q.credits.hasCredits ? Number(q.credits.balance).toFixed(2) : "?";
+  const shortReset = q && q.shortResetAt ? fmtT(q.shortResetAt * 1000) : "?";
+  const weeklyReset = q && q.weeklyResetAt ? fmtT(q.weeklyResetAt * 1000) : "?";
+  const n = rc && typeof rc.available_count === "number" ? rc.available_count : "?";
+  const exp = rc && Array.isArray(rc.credits) && rc.credits.length ? rc.credits.map((c) => String(c.expires_at || "").slice(0, 10)).join(" / ") : "-";
+  return [
+    "账号: " + accountId,
+    `5h 窗口: ${short}%（${shortReset} 重置）`,
+    `周窗口: ${weekly}%（${weeklyReset} 重置）`,
+    `Credits: $${bal}`,
+    `重置卡: 剩余 ${n} 张（到期 ${exp}）`,
+  ].join("\n");
+}
+
+async function main() {
+  if (!token()) { console.error("缺少 ~/.opencodex/admin-api-token"); process.exit(1); }
+  const { accountId, q } = await getQuota();
+  const rc = await getResetCredits(accountId).catch((e) => ({ error: e.message }));
+
+  if (!wantConsume) {
+    if (asJson) log(JSON.stringify({ accountId, quota: q, resetCredits: rc }, null, 2));
+    else log(statusText(accountId, q, rc));
+    if (rc && rc.error) { console.error("reset-credits 查询失败: " + rc.error); process.exit(1); }
+    return;
+  }
+  if (!hasYes) { console.error("拒绝执行：消耗重置卡需显式 --consume --yes（不可逆操作）"); process.exit(2); }
+
+  const beforeCards = rc && typeof rc.available_count === "number" ? rc.available_count : null;
+  if (beforeCards === 0) { console.error("没有可用的重置卡，未执行。"); process.exit(3); }
+
+  const operationId = randomUUID();
+  log(`正在消耗 1 张重置卡（operationId=${operationId}）…`);
+  const res = await consume(accountId, operationId);
+  log("consume →", res.status, JSON.stringify(res.body));
+
+  const ok = res.status === 200 && ["reset", "already_redeemed"].includes(res.body && res.body.code);
+  await refresh();
+  const after = await getQuota();
+  const rc2 = await getResetCredits(after.accountId).catch(() => rc);
+  syncState(after.q);
+
+  const newCards = rc2 && typeof rc2.available_count === "number" ? rc2.available_count : "?";
+  const q2 = after.q;
+  const body = [
+    ok ? "✅ 重置成功" : "⚠️ 结果待确认（" + ((res.body && (res.body.code || res.body.error)) || res.status) + "）",
+    `5h 窗口: ${q2 ? q2.shortPercent : "?"}%（${q2 && q2.shortResetAt ? fmtT(q2.shortResetAt * 1000) : "?"} 重置）`,
+    `周窗口: ${q2 ? q2.weeklyPercent : "?"}%`,
+    `Credits: $${q2 && q2.credits ? Number(q2.credits.balance).toFixed(2) : "?"}`,
+    `重置卡: 剩余 ${newCards} 张${beforeCards != null && newCards !== "?" ? "（本次 -" + (beforeCards - newCards) + "）" : ""}`,
+  ].join("\n");
+
+  if (asJson) log(JSON.stringify({ ok, consume: res, quota: q2, resetCredits: rc2 }, null, 2));
+  else log("\n" + body);
+
+  try {
+    await notify({ header: { template: ok ? "blue" : "orange", title: { tag: "plain_text", content: ok ? "🔄 Codex 额度已重置" : "⚠️ Codex 重置结果待确认" } }, elements: [{ tag: "markdown", content: body }] });
+    log("已推送【通知】群");
+  } catch (e) { log("[warn] 通知推送失败:", e.message); }
+
+  process.exit(ok ? 0 : 1);
+}
+
+main().catch((e) => { console.error("FATAL", e); process.exit(1); });
