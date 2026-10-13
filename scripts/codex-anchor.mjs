@@ -185,6 +185,17 @@ function burnTailWeekly(usedPct, jump, daysLeft, resetTs) {
   const wProj = Math.min(100, Math.round(usedPct + wPerDay * daysLeft));
   return "按此速率到重置预计 **" + wProj + "%**（不会用光）";
 }
+// 档位卡（5h/周）：标题=实际用量，档位挪进正文——避免「窗口 80%」被误读成用量只有 80%（2026-10-13 用户反馈歧义）
+function levelCard5h(lvl, usedPct, resetSec, weeklyPct, test = false) {
+  const tpl = lvl >= 95 ? ["red", "🔴"] : lvl >= 80 ? ["orange", "🟠"] : ["yellow", "🟡"];
+  const kind = lvl === PRE_WARN_PP ? "提前哨线" : "告警线";
+  const base = `5h 窗口已用 **${usedPct}%**（${fmtT(resetSec * 1000)} 重置，${remainStr(resetSec)}）`;
+  return { header: { template: tpl[0], title: { tag: "plain_text", content: (test ? "【测试】" : "") + `${tpl[1]} Codex 5h 已用 ${usedPct}%` } }, elements: [{ tag: "markdown", content: `${base}\n已越过 **${lvl}%** ${kind}\n周窗口已用 **${weeklyPct ?? "?"}%**` }] };
+}
+function levelCardWeek(lvl, usedPct, resetSec, p5, test = false) {
+  const tpl = lvl >= 90 ? ["red", "🔴"] : lvl >= 75 ? ["orange", "🟠"] : ["yellow", "🟡"];
+  return { header: { template: tpl[0], title: { tag: "plain_text", content: (test ? "【测试】" : "") + `${tpl[1]} Codex 周额度已用 ${usedPct}%` } }, elements: [{ tag: "markdown", content: `周窗口已用 **${usedPct}%**（${fmtDT(resetSec * 1000)} 重置）\n已越过 **${lvl}%** 告警线\n5h 窗口已用 ${p5}%` }] };
+}
 // 状态卡（原日报卡格式，2026-10-13 并入自动补锚卡；锚定/事件复用同一格式）
 function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
   const p = rl.primary, s = rl.secondary;
@@ -279,7 +290,7 @@ function usageEvents(st, snap) {
     else if (rc < st.seenResetCredits) {
       out.push({
         title: "🔄 Codex 重置卡被使用",
-        body: `重置卡被使用 **${st.seenResetCredits - rc}** 张｜剩余 **${rc}** 张\n5h 窗口 ${snap.rl.primary?.used_percent ?? "?"}%｜周窗口 ${snap.rl.secondary?.used_percent ?? "?"}%`,
+        body: `重置卡被使用 **${st.seenResetCredits - rc}** 张｜剩余 **${rc}** 张\n5h 窗口已用 ${snap.rl.primary?.used_percent ?? "?"}%｜周窗口已用 ${snap.rl.secondary?.used_percent ?? "?"}%`,
       });
       st.seenResetCredits = rc;
     } else if (rc > st.seenResetCredits) st.seenResetCredits = rc; // 新发卡：静默同步
@@ -435,15 +446,8 @@ async function monitor() {
 
   const base = `5h 窗口已用 **${p.used_percent}%**（${fmtT(p.resets_at * 1000)} 重置，${remainStr(p.resets_at)}）`;
   const mark5h = (lv) => { for (const v of [PRE_WARN_PP, 80, 95]) if (v <= lv && !alerted.includes(String(v))) alerted.push(String(v)); }; // 报高级别时把更低的闸一并标记，避免跳档后补报一条
-  if (p.used_percent >= 95 && !alerted.includes("95")) {
-    mark5h(95); card = { header: { template: "red", title: { tag: "plain_text", content: "🔴 Codex 5h 窗口 95%" } }, elements: [{ tag: "markdown", content: `${base}\n周窗口 ${snap.rl.secondary?.used_percent ?? "?"}%` }] };
-  } else if (p.used_percent >= 80 && !alerted.includes("80")) {
-    mark5h(80); card = { header: { template: "orange", title: { tag: "plain_text", content: "🟠 Codex 5h 窗口 80%" } }, elements: [{ tag: "markdown", content: `${base}\n周窗口 ${snap.rl.secondary?.used_percent ?? "?"}%` }] };
-  }
-
-  // 提前哨：5h 用量越 PRE_WARN_PP（默认 75%）先报一条，每窗口一次
-  if (!card && p.used_percent >= PRE_WARN_PP && !alerted.includes(String(PRE_WARN_PP))) {
-    mark5h(PRE_WARN_PP); card = { header: { template: "yellow", title: { tag: "plain_text", content: `🟡 Codex 5h 窗口 ${PRE_WARN_PP}%` } }, elements: [{ tag: "markdown", content: base + "\n周窗口 " + (snap.rl.secondary?.used_percent ?? "?") + "%" }] };
+  for (const lv of [95, 80, PRE_WARN_PP]) { // 高级别优先；标题用实际用量，档位写正文
+    if (p.used_percent >= lv && !alerted.includes(String(lv))) { mark5h(lv); card = levelCard5h(lv, p.used_percent, p.resets_at, snap.rl.secondary?.used_percent); break; }
   }
 
   if (!card && now() - st.burnLast > BURN_COOLDOWN_MS) {
@@ -472,7 +476,7 @@ async function monitor() {
     for (const gate of [[90, "red", "🔴"], [75, "orange", "🟠"], [50, "yellow", "🟡"]]) {
       if (sw.used_percent >= gate[0] && !wAlerted.includes(String(gate[0]))) {
         wAlerted.push(String(gate[0]));
-        card = { header: { template: gate[1], title: { tag: "plain_text", content: gate[2] + " Codex 周窗口 " + gate[0] + "%" } }, elements: [{ tag: "markdown", content: wBase + "\n5h 窗口 " + p.used_percent + "%" }] };
+        card = levelCardWeek(gate[0], sw.used_percent, sw.resets_at, p.used_percent);
         break;
       }
     }
@@ -497,6 +501,15 @@ async function monitor() {
   saveState(st);
   if (card) { await sendAlert(card); log("alert sent:", card.header.title.content); }
   else log(`monitor ok: ${p.used_percent}% [${src}]`);
+}
+
+// ---------- self-test: 档位卡文案预览（不读真实数据、不改 state）----------
+async function levelTest() {
+  const reset5 = Math.floor((now() + 16 * 6e4) / 1000);
+  const resetw = Math.floor((now() + 4.2 * 864e5) / 1000);
+  for (const c of [levelCard5h(80, 91, reset5, 14, true), levelCardWeek(50, 53, resetw, 91, true)]) {
+    await sendAlert(c); log("alert sent(test):", c.header.title.content);
+  }
 }
 
 // ---------- self-test: 往告警群推一张模拟燃烧卡（不读真实数据、不改 state）----------
@@ -555,6 +568,7 @@ try {
   if (process.env.WINDOW_TEST === "1") windowTest();
   else if (process.env.CARD_TEST === "1") await cardTest();
   else if (process.env.BURN_TEST === "1") await burnedTest();
+  else if (process.env.LEVEL_TEST === "1") await levelTest();
   else if (mode === "monitor") await monitor();
   else { console.error("usage: codex-anchor.mjs monitor"); process.exit(2); }
 } catch (e) {
