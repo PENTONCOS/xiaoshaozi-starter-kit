@@ -21,7 +21,8 @@ const SESSIONS = join(homedir(), ".codex/sessions");
 const STATE_PATH = join(homedir(), "my-assistant/state/codex-anchor-state.json");
 const LOG_TAG = "[codex-anchor]";
 const BURN_WINDOW_MIN = 30;     // 燃烧速率观察窗
-const BURN_JUMP_PP = 15;        // 30min 内涨 25 个百分点 → 燃烧过快
+const BURN_JUMP_PP = 15;        // 30min 内涨 15 个百分点 → 燃烧过快
+const SAFE_RESERVE_PP = 10;     // 安全余量：建议速度按「到重置留 10% 不用光」计算
 const BURN_COOLDOWN_MS = 45 * 60 * 1000;
 const FAIL_COOLDOWN_MS = 60 * 60 * 1000;
 const BEIJING = "Asia/Shanghai";
@@ -128,6 +129,30 @@ function remainStr(resetsSec) {
   if (ms <= 0) return "已过期";
   const h = Math.floor(ms / 3.6e6), m = Math.round((ms % 3.6e6) / 6e4);
   return h > 0 ? `还剩 ${h}h${m}m` : `还剩 ${m}m`;
+}
+// 5h 燃烧外推：何时用光 + 建议压到多少（留 SAFE_RESERVE_PP% 余量）
+function burnTail5h(usedPct, jump, minsLeft, resetTs) {
+  const remainPp = 100 - usedPct;
+  const perMin = jump / BURN_WINDOW_MIN;
+  const exhaustMin = perMin > 0 ? remainPp / perMin : Infinity;
+  if (minsLeft > 0 && exhaustMin < minsLeft) {
+    const rec30 = Math.max(1, Math.floor(((remainPp - SAFE_RESERVE_PP) / minsLeft) * BURN_WINDOW_MIN));
+    return `照此速度约 **${fmtT(now() + exhaustMin * 6e4)}** 就会用光（早于 ${fmtT(resetTs)} 刷新）\n想撑到刷新并留 ${SAFE_RESERVE_PP}% 余量：把速度压到 ≤ **${rec30}pp/30min**（现在 ${Math.round(jump)}pp/30min）`;
+  }
+  const proj = minsLeft > 0 ? Math.min(100, Math.round(usedPct + perMin * Math.min(minsLeft, 300))) : usedPct;
+  return `按此速率到重置预计 **${proj}%**（不会用光）`;
+}
+// 周窗口燃烧外推：同逻辑，单位换成 pp/天
+function burnTailWeekly(usedPct, jump, daysLeft, resetTs) {
+  const wPerDay = jump * 8;
+  const wRemain = 100 - usedPct;
+  const exhaustDays = wPerDay > 0 ? wRemain / wPerDay : Infinity;
+  if (exhaustDays < daysLeft) {
+    const recDay = Math.max(1, Math.floor((wRemain - SAFE_RESERVE_PP) / daysLeft));
+    return "照此速度约 **" + fmtDT(now() + exhaustDays * 864e5) + "** 就会用光（早于 " + fmtDT(resetTs) + " 刷新）\n想撑到刷新并留 " + SAFE_RESERVE_PP + "% 余量：把日耗压到 ≤ **" + recDay + "pp/天**（现在约 " + Math.round(wPerDay) + "pp/天）";
+  }
+  const wProj = Math.min(100, Math.round(usedPct + wPerDay * daysLeft));
+  return "按此速率到重置预计 **" + wProj + "%**（不会用光）";
 }
 function buildDailyCard(rl, snapTs, st, anchored, resetCredits = null) {
   const p = rl.primary, s = rl.secondary;
@@ -314,16 +339,7 @@ async function monitor() {
       if (jump >= BURN_JUMP_PP) {
         st.burnLast = now();
         const minsLeft = (p.resets_at * 1000 - now()) / 6e4;
-        const proj = minsLeft > 0 ? Math.min(100, Math.round(last.p5 + (jump / BURN_WINDOW_MIN) * Math.min(minsLeft, 300))) : last.p5;
-        const remainPp = 100 - last.p5;
-        const exhaustMin = jump > 0 ? remainPp / (jump / BURN_WINDOW_MIN) : Infinity;
-        let tail;
-        if (minsLeft > 0 && exhaustMin < minsLeft) {
-          const rec30 = Math.max(1, Math.floor((remainPp / minsLeft) * BURN_WINDOW_MIN));
-          tail = `照此速度约 **${fmtT(now() + exhaustMin * 6e4)}** 就会用光（早于 ${fmtT(p.resets_at * 1000)} 刷新）\n想撑到刷新：把速度压到 ≤ **${rec30}pp/30min**（现在 ${Math.round(jump)}pp/30min）`;
-        } else {
-          tail = `按此速率到重置预计 **${proj}%**（不会用光）`;
-        }
+        const tail = burnTail5h(last.p5, jump, minsLeft, p.resets_at * 1000);
         card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 消耗过快" } }, elements: [{ tag: "markdown", content: `${base}\n近 ${BURN_WINDOW_MIN} 分钟涨 **${jump}pp**｜${tail}` }] };
       }
     }
@@ -352,17 +368,7 @@ async function monitor() {
         if (wJump >= 10) {
           st.wkBurnLast = now();
           const wDaysLeft = Math.max(0.01, (sw.resets_at * 1000 - now()) / 864e5);
-          const wProj = Math.min(100, Math.round(sw.used_percent + wJump * 8 * wDaysLeft));
-          const wPerDay = wJump * 8;
-          const wRemain = 100 - sw.used_percent;
-          const wExhaustDays = wPerDay > 0 ? wRemain / wPerDay : Infinity;
-          let wTail;
-          if (wExhaustDays < wDaysLeft) {
-            const recDay = Math.max(1, Math.floor(wRemain / wDaysLeft));
-            wTail = "照此速度约 **" + fmtDT(now() + wExhaustDays * 864e5) + "** 就会用光（早于 " + fmtDT(sw.resets_at * 1000) + " 刷新）\n想撑到刷新：把日耗压到 ≤ **" + recDay + "pp/天**（现在约 " + Math.round(wPerDay) + "pp/天）";
-          } else {
-            wTail = "按此速率到重置预计 **" + wProj + "%**（不会用光）";
-          }
+          const wTail = burnTailWeekly(sw.used_percent, wJump, wDaysLeft, sw.resets_at * 1000);
           card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 周额度消耗过快" } }, elements: [{ tag: "markdown", content: wBase + "\n近 3 小时涨 **" + wJump + "pp**｜" + wTail }] };
         }
       }
@@ -377,9 +383,28 @@ async function monitor() {
   else log(`monitor ok: ${p.used_percent}% [${src}]`);
 }
 
+// ---------- self-test: 往告警群推一张模拟燃烧卡（不读真实数据、不改 state）----------
+async function burnedTest() {
+  const u5 = Number(process.env.BURN_TEST_USED || 28);
+  const j5 = Number(process.env.BURN_TEST_JUMP || 21);
+  const ml = Number(process.env.BURN_TEST_MINSLEFT || 200);
+  const reset5 = now() + ml * 6e4;
+  const base5 = `5h 窗口已用 **${u5}%**（${fmtT(reset5)} 重置，${remainStr(Math.floor(reset5 / 1000))}）`;
+  const c5 = { header: { template: "orange", title: { tag: "plain_text", content: "【测试】🔥 Codex 消耗过快" } }, elements: [{ tag: "markdown", content: `${base5}\n近 ${BURN_WINDOW_MIN} 分钟涨 **${j5}pp**｜${burnTail5h(u5, j5, ml, reset5)}` }] };
+  await sendAlert(c5); log("alert sent(test):", c5.header.title.content);
+
+  const uw = Number(process.env.BURN_TEST_WUSED || 21);
+  const jw = Number(process.env.BURN_TEST_WJUMP || 12);
+  const dl = Number(process.env.BURN_TEST_WDAYSLEFT || 5.27);
+  const resetw = now() + dl * 864e5;
+  const cw = { header: { template: "orange", title: { tag: "plain_text", content: "【测试】🔥 Codex 周额度消耗过快" } }, elements: [{ tag: "markdown", content: `周窗口已用 **${uw}%**（${fmtDT(resetw)} 重置）\n近 3 小时涨 **${jw}pp**｜${burnTailWeekly(uw, jw, dl, resetw)}` }] };
+  await sendAlert(cw); log("alert sent(test):", cw.header.title.content);
+}
+
 // ---------- main ----------
 try {
-  if (mode === "morning") await morning();
+  if (process.env.BURN_TEST === "1") await burnedTest();
+  else if (mode === "morning") await morning();
   else if (mode === "monitor") await monitor();
   else { console.error("usage: codex-anchor.mjs morning|monitor"); process.exit(2); }
 } catch (e) {
