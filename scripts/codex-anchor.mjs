@@ -4,7 +4,7 @@
 // morning  : 每天 09:00 / 14:05 发一次最小探测请求锚定 5h 窗口，
 //            然后读最新快照，推日报卡到通知群（5h/周窗口、Credits、上一窗口峰值、ΔCredits）。
 // monitor  : 每 10 分钟（24/7 全天候）缓存读最新 rollout 快照（零请求），
-//            80%/95% 每窗口各告警一次；30 分钟内涨幅 ≥25pp 触发燃烧过快告警（45min 冷却）。
+//            80%/95% 每窗口各告警一次；30 分钟内涨幅 ≥15pp 触发燃烧过快告警（45min 冷却）。
 // 失败处理 : probe 失败自动重试 1 次，仍失败走告警路由（告警群），失败卡冷却 1h。
 // 数据来源 : ~/.codex/sessions/**/*.jsonl 内的 rate_limits（每次真实 codex 运行免费写入）。
 // 路由     : 日报卡 → 通知群（getSender "push"）；余量/燃烧过快/失败卡 → 告警群（getSender "alert"）。
@@ -20,7 +20,7 @@ const SESSIONS = join(homedir(), ".codex/sessions");
 const STATE_PATH = join(homedir(), "my-assistant/state/codex-anchor-state.json");
 const LOG_TAG = "[codex-anchor]";
 const BURN_WINDOW_MIN = 30;     // 燃烧速率观察窗
-const BURN_JUMP_PP = 25;        // 30min 内涨 25 个百分点 → 燃烧过快
+const BURN_JUMP_PP = 15;        // 30min 内涨 25 个百分点 → 燃烧过快
 const BURN_COOLDOWN_MS = 45 * 60 * 1000;
 const FAIL_COOLDOWN_MS = 60 * 60 * 1000;
 const BEIJING = "Asia/Shanghai";
@@ -148,6 +148,43 @@ function buildDailyCard(rl, snapTs, st, anchored) {
   return { header: { template: p && p.used_percent >= 80 ? "orange" : "green", title: { tag: "plain_text", content: title } }, elements: [{ tag: "markdown", content: lines.join("\n") }] };
 }
 
+// ---------- opencodex real quota (zero-LLM API source) ----------
+const OCX_QUOTA_URL = "http://127.0.0.1:10100/api/codex-auth/quota";
+const OCX_REFRESH_URL = "http://127.0.0.1:10100/api/codex-auth/accounts/refresh";
+const OCX_STALE_MS = 15 * 60 * 1000;
+function ocxToken() { try { return readFileSync(join(homedir(), ".opencodex/admin-api-token"), "utf8").trim(); } catch { return ""; } }
+function ocxSnap(j) {
+  const qs = (j && j.quotas) || {};
+  const key = qs.__main__ ? "__main__" : Object.keys(qs)[0];
+  const q = key ? qs[key] : null;
+  if (!q) return null;
+  const bal = q.credits && q.credits.hasCredits ? Number(q.credits.balance) : null;
+  const rl = {
+    primary: q.shortPercent != null && q.shortResetAt ? { used_percent: q.shortPercent, resets_at: q.shortResetAt, window_minutes: Math.round((q.shortWindowSeconds || 18000) / 60) } : null,
+    secondary: q.weeklyPercent != null && q.weeklyResetAt ? { used_percent: q.weeklyPercent, resets_at: q.weeklyResetAt } : null,
+    credits: { has_credits: bal != null, balance: bal },
+  };
+  return { rl, ts: now(), updatedAt: q.updatedAt || null };
+}
+async function fetchOcxQuota(allowRefresh) {
+  const token = ocxToken();
+  if (!token) return null;
+  const H = { Authorization: "Bearer " + token };
+  try {
+    const r = await fetch(OCX_QUOTA_URL, { headers: H, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    let snap = ocxSnap(await r.json());
+    if (snap && allowRefresh && (!snap.updatedAt || now() - snap.updatedAt > OCX_STALE_MS)) {
+      try {
+        await fetch(OCX_REFRESH_URL, { method: "POST", headers: H, signal: AbortSignal.timeout(20000) });
+        const r2 = await fetch(OCX_QUOTA_URL, { headers: H, signal: AbortSignal.timeout(8000) });
+        if (r2.ok) { const s2 = ocxSnap(await r2.json()); if (s2) snap = s2; }
+      } catch { /* refresh is best-effort, observational for raw admin */ }
+    }
+    return snap && snap.rl && snap.rl.primary ? snap : null;
+  } catch { return null; }
+}
+
 // ---------- morning ----------
 async function morning() {
   const st = loadState();
@@ -191,8 +228,12 @@ function recordSample(st, snap) {
 
 async function monitor() {
   // 24/7：不区分工作日与时段，缓存读快照零请求
-  const snap = readSnapshot();
+  let snap = await fetchOcxQuota(true);
+  let src = "ocx";
+  if (!snap) { snap = readSnapshot(); src = "rollout"; }
   if (!snap) { log("no snapshot yet"); return; }
+  const snapAgeMin = Math.round((now() - snap.ts) / 6e4);
+  if (src === "rollout" && snapAgeMin > 60) { log("stale rollout snapshot " + snapAgeMin + "m, skip"); return; }
   const st = loadState();
   recordSample(st, snap);
   const p = snap.rl.primary;
@@ -211,6 +252,10 @@ async function monitor() {
   }
 
   // burn rate: Δpct within last 30min ≥ 25pp
+  if (!card && p.used_percent >= 60 && !alerted.includes("60")) {
+    alerted.push("60"); card = { header: { template: "yellow", title: { tag: "plain_text", content: "🟡 Codex 5h 窗口 60%" } }, elements: [{ tag: "markdown", content: base + "\n周窗口 " + (snap.rl.secondary?.used_percent ?? "?") + "%" }] };
+  }
+
   if (!card && now() - st.burnLast > BURN_COOLDOWN_MS) {
     const recent = st.samples.filter((x) => x.t >= now() - BURN_WINDOW_MIN * 6e4 && x.p5 != null);
     if (recent.length >= 2) {
@@ -226,12 +271,41 @@ async function monitor() {
   }
 
   // prune old window dedupe keys (keep 4)
+  // weekly window alerts (2026-10-13): level gates one-shot per week + 3h burn projection
+  const sw = snap.rl.secondary;
+  if (!card && sw && sw.used_percent != null && sw.resets_at) {
+    const wkey = "wk|" + sw.resets_at;
+    const isFirst = !st.windowAlerts[wkey];
+    const wAlerted = (st.windowAlerts[wkey] = st.windowAlerts[wkey] || []);
+    for (const lv of [50, 75, 90]) if (isFirst && sw.used_percent >= lv && !wAlerted.includes(String(lv))) wAlerted.push(String(lv));
+    const wBase = "周窗口已用 **" + sw.used_percent + "%**（" + fmtDT(sw.resets_at * 1000) + " 重置）";
+    for (const gate of [[90, "red", "🔴"], [75, "orange", "🟠"], [50, "yellow", "🟡"]]) {
+      if (sw.used_percent >= gate[0] && !wAlerted.includes(String(gate[0]))) {
+        wAlerted.push(String(gate[0]));
+        card = { header: { template: gate[1], title: { tag: "plain_text", content: gate[2] + " Codex 周窗口 " + gate[0] + "%" } }, elements: [{ tag: "markdown", content: wBase + "\n5h 窗口 " + p.used_percent + "%" }] };
+        break;
+      }
+    }
+    if (!card && now() - (st.wkBurnLast || 0) > 6 * 3.6e6) {
+      const wRecent = st.samples.filter((x) => x.t >= now() - 3 * 3.6e6 && x.pw != null);
+      if (wRecent.length >= 2) {
+        const wJump = wRecent[wRecent.length - 1].pw - wRecent[0].pw;
+        if (wJump >= 10) {
+          st.wkBurnLast = now();
+          const wDaysLeft = Math.max(0.01, (sw.resets_at * 1000 - now()) / 864e5);
+          const wProj = Math.min(100, Math.round(sw.used_percent + wJump * 8 * wDaysLeft));
+          card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 周额度消耗过快" } }, elements: [{ tag: "markdown", content: wBase + "\n近 3 小时涨 **" + wJump + "pp**｜按此速率到重置预计 **" + wProj + "%**" }] };
+        }
+      }
+    }
+  }
+
   const wk = Object.keys(st.windowAlerts);
-  if (wk.length > 4) wk.sort((a, b) => Number(a.split("|")[1]) - Number(b.split("|")[1])).slice(0, wk.length - 4).forEach((k) => delete st.windowAlerts[k]);
+  if (wk.length > 8) wk.sort((a, b) => Number(a.split("|")[1]) - Number(b.split("|")[1])).slice(0, wk.length - 8).forEach((k) => delete st.windowAlerts[k]);
 
   saveState(st);
   if (card) { await sendAlert(card); log("alert sent:", card.header.title.content); }
-  else log(`monitor ok: ${p.used_percent}%`);
+  else log(`monitor ok: ${p.used_percent}% [${src}]`);
 }
 
 // ---------- main ----------
