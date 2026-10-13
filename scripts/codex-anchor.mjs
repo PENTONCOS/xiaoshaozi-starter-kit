@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 // codex-anchor — Codex 5h 窗口锚定 + 余量监控. Zero-LLM (仅 spawn codex CLI 探测).
 //
-// morning  : 每天 09:00 / 14:05 发一次最小探测请求锚定 5h 窗口，
-//            然后读最新快照，推日报卡到通知群（5h/周窗口、Credits、上一窗口峰值、ΔCredits）。
-// monitor  : 每 10 分钟（24/7 全天候）缓存读最新 rollout 快照（零请求），
-//            80%/95% 每窗口各告警一次；30 分钟内涨幅 ≥15pp 触发燃烧过快告警（45min 冷却）。
-// 失败处理 : probe 失败自动重试 1 次，仍失败走告警路由（告警群），失败卡冷却 1h。
-// 数据来源 : ~/.codex/sessions/**/*.jsonl 内的 rate_limits（每次真实 codex 运行免费写入）。
-// 路由     : 日报卡 → 通知群（getSender "push"）；余量/燃烧过快/失败卡 → 告警群（getSender "alert"）。
-//            重置卡被使用 / Credits 被消耗 → 通知群（零 LLM，读 quota API 的 resetCredits / credits.balance）。
-//            重置卡 7 天内到期未用 → 并入日报卡的重置卡行提醒（读 reset-credits 的 expires_at）。
-// 调度     : 24/7，不区分工作日与时段（2026-10-12 定案）。
-// 自动补锚 : 09:00–21:00 且 5h 窗口处于「空闲未认领」（relay 报 reset = 观测时刻 + 整窗长）时，
-//            连续两次判空闲（≥8min）后自动探一次，把窗口锚在当下；90min 冷却 + 3 次/天上限兜成本。
+// 锚定     : 无固定定时探测。09:00–21:00 且 5h 窗口处于「空闲未认领」（relay 报 reset = 观测时刻 + 整窗长）时，
+//            连续两次判空闲（≥8min）后自动探一次，把窗口锚在当下；90min 冷却 + 6 次/天上限兜成本。
 //            依据：重置/自然到期只清零、不锚定，空闲窗口只有发请求才认领锚点（2026-10-13 实测）。
+// 状态卡   : 每次自动补锚成功 → 推一张状态卡到通知群（5h/周窗口、Credits、上一窗口峰值、ΔCredits、重置卡余额）。
+//            （原 09:00/14:05 固定日报卡已于 2026-10-13 退休，格式并入此卡——用户定案：固定探测逻辑改用自动补锚。）
+// monitor  : 每 10 分钟（24/7 全天候）读 ocx quota（rollout 快照兜底，>60min 视为过期跳过），
+//            60/80/95% 每窗口各告警一次；30min 涨 ≥15pp 触发燃烧过快告警（45min 冷却）；周窗口 50/75/90%。
+// 失败处理 : probe 失败自动重试 1 次，仍失败走告警路由（告警群），失败卡冷却 1h。
+// 数据来源 : opencodex quota API（127.0.0.1:10100，零额度观测）；rollout 快照兜底。
+// 路由     : 状态卡 / 重置卡被使用 / Credits 被消耗 / 重置卡到期提醒 → 通知群（getSender "push"）；
+//            余量/燃烧过快/失败卡 → 告警群（getSender "alert"）。
+// 到期提醒 : 监控每轮读 reset-credits，最近一张卡 ≤7 天到期且未提醒过 → 单独推一条（按 expires_at 去重）。
+// 调度     : monitor 24/7 每 10 分钟；不区分工作日与时段（2026-10-12 定案）。
 
 import { readdirSync, statSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -32,7 +32,7 @@ const FAIL_COOLDOWN_MS = 60 * 60 * 1000;
 const AUTO_PROBE_FROM = 9, AUTO_PROBE_TO = 21; // 自动补锚时段（北京时间）
 const AUTO_PROBE_IDLE_MIN_MS = Number(process.env.AUTO_PROBE_IDLE_MS || 8 * 60 * 1000); // 连续空闲判定窗
 const AUTO_PROBE_COOLDOWN_MS = 90 * 60 * 1000; // 两次自动补锚最短间隔
-const AUTO_PROBE_MAX_PER_DAY = 3;              // 每日自动补锚上限（成本护栏）
+const AUTO_PROBE_MAX_PER_DAY = 6;              // 每日自动补锚上限（成为主力后放宽；真正的成本闸门是「仅在真空闲时探」）
 const BEIJING = "Asia/Shanghai";
 
 const mode = process.argv[2] || "";
@@ -163,22 +163,23 @@ function burnTailWeekly(usedPct, jump, daysLeft, resetTs) {
   const wProj = Math.min(100, Math.round(usedPct + wPerDay * daysLeft));
   return "按此速率到重置预计 **" + wProj + "%**（不会用光）";
 }
-function buildDailyCard(rl, snapTs, st, anchored, resetCredits = null, creditExpiry = null) {
+// 状态卡（原日报卡格式，2026-10-13 并入自动补锚卡；锚定/事件复用同一格式）
+function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
   const p = rl.primary, s = rl.secondary;
   const ageMin = Math.max(0, Math.round((now() - snapTs) / 6e4));
   const credits = rl.credits?.has_credits ? Number(rl.credits.balance).toFixed(2) : null;
   const today = new Date().toLocaleDateString("zh-CN", { timeZone: BEIJING });
-  const creditWarn = creditExpiry != null && creditExpiry.daysLeft <= EXPIRY_WARN_DAYS;
   const dayCred = st.dayCredits[today];
   const dCred = credits && dayCred != null ? (credits - dayCred) : null;
-  const peakEntry = Object.entries(st.peaks).sort((a, b) => Number(b[0].split("|")[1]) - Number(a[0].split("|")[1]))[0];
-  const peak = peakEntry ? peakEntry[1] : null;
-  const title = anchored ? "⚓ Codex 窗口已锚定" : "⏱ Codex 窗口进行中";
+  const curKey = p ? `w|${p.resets_at}` : null; // 上一窗口峰值：排除当前（刚锚定）窗口，取其前一个
+  const prevPeak = Object.entries(st.peaks).filter(([k]) => k !== curKey).sort((a, b) => Number(b[0].split("|")[1]) - Number(a[0].split("|")[1]))[0];
+  const peak = prevPeak ? prevPeak[1] : null;
+  const title = anchored ? "⚓ Codex 窗口已锚定（自动补锚）" : "⏱ Codex 窗口进行中";
   const lines = [
     `**5h 窗口**：已用 ${p ? p.used_percent : "?"}%｜${p ? `${fmtT(p.resets_at * 1000)} 重置（${remainStr(p.resets_at)}）` : "无数据"}`,
     `**周窗口**：已用 ${s ? s.used_percent : "?"}%｜${s ? `${fmtDT(s.resets_at * 1000)} 重置` : "无数据"}`,
     credits ? `**Credits**：$${credits}${dCred != null ? `（今日 ${dCred >= 0 ? "+" : ""}$${dCred.toFixed(2)}）` : ""}` : null,
-    resetCredits != null || creditWarn ? `**重置卡**：${resetCredits != null ? `${resetCredits} 张` : "?"}${creditWarn ? `　⚠️ 最近一张 **${fmtD(creditExpiry.exp)} 到期**（${Math.ceil(creditExpiry.daysLeft) > 0 ? `还剩 ${Math.ceil(creditExpiry.daysLeft)} 天` : "不足 1 天"}），记得用` : ""}` : null,
+    resetCredits != null ? `**重置卡**：${resetCredits} 张` : null,
     peak != null ? `**上一窗口峰值**：${peak}%` : null,
     `快照：${fmtT(snapTs)}（${ageMin} 分钟前）`,
   ].filter(Boolean);
@@ -315,28 +316,35 @@ async function flushUsage(st, fresh) {
   catch (e) { st.pendingUsage = items; log("usage notify failed, requeued:", e.message); }
 }
 
-// ---------- morning ----------
-async function morning() {
-  const st = loadState();
-  const ok = await probeWithRetry();
-  if (!ok) {
-    if (now() - st.failLast > FAIL_COOLDOWN_MS) { st.failLast = now(); saveState(st); await sendFailureCard("morning probe 两次尝试均失败（codex exec 超时/非零退出）"); }
-    else log("probe failed, failure card on cooldown");
-    process.exitCode = 1;
-    return;
-  }
-  const snap = readSnapshot();
-  if (!snap) { await sendFailureCard("probe 成功但本地未找到 rate_limits 快照"); process.exitCode = 1; return; }
-  const p = snap.rl.primary;
-  const anchored = p ? (p.used_percent === 0 || p.resets_at * 1000 - snap.ts >= 4.8 * 3.6e6) : false; // 新鲜锚定：0% 或重置点距快照≈满 5h
-  const ocx = await fetchOcxQuota(true); // 账户重置卡余额（零额度消耗的观测读）
-  const rcs = await fetchResetCredits(); // 重置卡逐张到期日（到期提醒用）
-  st.lastAutoProbe = now(); // 明确探测过：自动补锚的冷却从这次起算，避免 14:05 后立刻重复锚定
-  recordSample(st, snap);
-  await sendPush(buildDailyCard(snap.rl, snap.ts, st, anchored, ocx?.resetCredits ?? rcs?.available_count ?? null, expiringCredit(rcs)));
-  saveState(st);
-  log("morning card sent", anchored ? "(anchored)" : "(in-window)");
+// 重置卡到期提醒卡（独立推送，不含在状态卡里——用户定案 2026-10-13）
+function buildExpiryCard(ec, n) {
+  const d = Math.max(0, Math.ceil(ec.daysLeft));
+  return {
+    header: { template: "yellow", title: { tag: "plain_text", content: "🎫 Codex 重置卡即将过期" } },
+    elements: [{ tag: "markdown", content: `最近一张重置卡 **${fmtD(ec.exp)} 到期**（${d > 0 ? `还剩 ${d} 天` : "不足 1 天"}）${n != null ? `｜当前剩 ${n} 张` : ""}\n趁没过期先用掉，否则作废。` }],
+  };
 }
+// 监控每轮调用：最近一张卡 ≤EXPIRY_WARN_DAYS 天到期且未提醒过 → 推一条（按 expires_at 去重；静默时段顺延）
+async function maybeExpiryReminder(st) {
+  const rcs = await fetchResetCredits();
+  const ec = expiringCredit(rcs);
+  if (!ec || ec.daysLeft > EXPIRY_WARN_DAYS) return false;
+  const key = String(ec.exp);
+  if (st.expiryWarned && st.expiryWarned[key]) return false;
+  if (inQuietHours()) { log("expiry reminder deferred (quiet hours)"); return false; }
+  const n = rcs && typeof rcs.available_count === "number" ? rcs.available_count : null;
+  try {
+    await sendPush(buildExpiryCard(ec, n));
+    st.expiryWarned = st.expiryWarned || {};
+    st.expiryWarned[key] = now();
+    const ks = Object.keys(st.expiryWarned);
+    if (ks.length > 10) ks.sort((a, b) => Number(a) - Number(b)).slice(0, ks.length - 10).forEach((k) => delete st.expiryWarned[k]);
+    log(`expiry reminder sent: ${fmtD(ec.exp)} (${ec.daysLeft.toFixed(2)}d), ${n} 张`);
+    return true;
+  } catch (e) { log("expiry reminder failed:", e.message); return false; }
+}
+
+// ---------- morning（2026-10-13 退休：固定日报取消，锚定交给 monitor 的自动补锚）----------
 
 // ---------- sampling & alerts ----------
 function recordSample(st, snap) {
@@ -369,11 +377,17 @@ async function monitor() {
   if (src === "rollout" && snapAgeMin > 60) { log("stale rollout snapshot " + snapAgeMin + "m, skip"); return; }
   const st = loadState();
   // 空闲窗口自动补锚（09:00–21:00）：重置/到期只清零不锚定，补一次请求把窗口锚在当下
-  if (await maybeAutoAnchor(st, snap)) {
+  const anchored = await maybeAutoAnchor(st, snap);
+  if (anchored) {
     const fresh = await fetchOcxQuota(true);
     if (fresh) { snap = fresh; src = "ocx"; }
   }
   recordSample(st, snap);
+  // 补锚成功 → 推状态卡（原日报卡格式）到通知群
+  if (anchored) {
+    await sendPush(buildStatusCard(snap.rl, snap.ts, st, true, snap.resetCredits ?? null));
+    log("anchor status card sent");
+  }
   const freshEvents = usageEvents(st, snap);
   if (process.env.USAGE_TEST === "1") freshEvents.push({ title: "🔄 Codex 重置卡被使用", body: "（自检）模拟消耗 1 张｜剩余 3 张" });
   await flushUsage(st, freshEvents);
@@ -444,6 +458,7 @@ async function monitor() {
   const wk = Object.keys(st.windowAlerts);
   if (wk.length > 8) wk.sort((a, b) => Number(a.split("|")[1]) - Number(b.split("|")[1])).slice(0, wk.length - 8).forEach((k) => delete st.windowAlerts[k]);
 
+  await maybeExpiryReminder(st); // 重置卡 7 天到期提醒（独立推送，按 expires_at 去重）
   saveState(st);
   if (card) { await sendAlert(card); log("alert sent:", card.header.title.content); }
   else log(`monitor ok: ${p.used_percent}% [${src}]`);
@@ -467,30 +482,31 @@ async function burnedTest() {
   await sendAlert(cw); log("alert sent(test):", cw.header.title.content);
 }
 
-// ---------- self-test: 打印一张含重置卡到期提醒的日报卡（不发卡，另做真实路径只读校验）----------
-async function dailyCardTest() {
+// ---------- self-test: 打印状态卡 + 到期提醒卡（不发卡；另做真实路径只读校验）----------
+async function cardTest() {
   const real = await fetchResetCredits();
-  const realExp = expiringCredit(real);
+  const realEc = expiringCredit(real);
   console.log("real reset-credits:", real ? `${real.available_count} 张` : "读取失败");
-  console.log("real earliest expiry:", realExp ? `${new Date(realExp.exp).toISOString()} (${realExp.daysLeft.toFixed(2)} 天，提醒=${realExp.daysLeft <= EXPIRY_WARN_DAYS})` : "-");
-  const exp = now() + Number(process.env.CREDIT_TEST_DAYS || 5.2) * 864e5;
+  console.log("real earliest expiry:", realEc ? `${new Date(realEc.exp).toISOString()} (${realEc.daysLeft.toFixed(2)} 天，提醒=${realEc.daysLeft <= EXPIRY_WARN_DAYS})` : "-");
   const rl = {
-    primary: { used_percent: 12, resets_at: Math.floor((now() + 3.5 * 3.6e6) / 1000) },
+    primary: { used_percent: 1, resets_at: Math.floor((now() + 5 * 3.6e6) / 1000) },
     secondary: { used_percent: 30, resets_at: Math.floor((now() + 4 * 864e5) / 1000) },
     credits: { has_credits: true, balance: 2955.17 },
   };
-  const st = { dayCredits: {}, peaks: {}, samples: [] };
-  const card = buildDailyCard(rl, now(), st, false, 3, { daysLeft: (exp - now()) / 864e5, exp });
-  console.log(JSON.stringify(card, null, 2));
+  const st = { dayCredits: {}, peaks: { "w|1000000000": 53 }, samples: [] };
+  console.log("--- status card (auto-anchor) ---");
+  console.log(JSON.stringify(buildStatusCard(rl, now(), st, true, 3), null, 2));
+  const days = Number(process.env.CREDIT_TEST_DAYS || 5.2);
+  console.log("--- expiry reminder card (synthetic " + days + "d) ---");
+  console.log(JSON.stringify(buildExpiryCard({ exp: now() + days * 864e5, daysLeft: days }, 3), null, 2));
 }
 
 // ---------- main ----------
 try {
-  if (process.env.DAILY_CARD_TEST === "1") await dailyCardTest();
+  if (process.env.CARD_TEST === "1") await cardTest();
   else if (process.env.BURN_TEST === "1") await burnedTest();
-  else if (mode === "morning") await morning();
   else if (mode === "monitor") await monitor();
-  else { console.error("usage: codex-anchor.mjs morning|monitor"); process.exit(2); }
+  else { console.error("usage: codex-anchor.mjs monitor"); process.exit(2); }
 } catch (e) {
   console.error("FATAL", e);
   if (now() - loadState().failLast > FAIL_COOLDOWN_MS) await sendFailureCard(`未捕获异常: ${e.message}`);
