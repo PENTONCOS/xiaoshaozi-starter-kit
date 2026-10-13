@@ -10,6 +10,9 @@
 // 路由     : 日报卡 → 通知群（getSender "push"）；余量/燃烧过快/失败卡 → 告警群（getSender "alert"）。
 //            重置卡被使用 / Credits 被消耗 → 通知群（零 LLM，读 quota API 的 resetCredits / credits.balance）。
 // 调度     : 24/7，不区分工作日与时段（2026-10-12 定案）。
+// 自动补锚 : 09:00–21:00 且 5h 窗口处于「空闲未认领」（relay 报 reset = 观测时刻 + 整窗长）时，
+//            连续两次判空闲（≥8min）后自动探一次，把窗口锚在当下；90min 冷却 + 3 次/天上限兜成本。
+//            依据：重置/自然到期只清零、不锚定，空闲窗口只有发请求才认领锚点（2026-10-13 实测）。
 
 import { readdirSync, statSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -25,6 +28,10 @@ const BURN_JUMP_PP = 15;        // 30min 内涨 15 个百分点 → 燃烧过快
 const SAFE_RESERVE_PP = 10;     // 安全余量：建议速度按「到重置留 10% 不用光」计算
 const BURN_COOLDOWN_MS = 45 * 60 * 1000;
 const FAIL_COOLDOWN_MS = 60 * 60 * 1000;
+const AUTO_PROBE_FROM = 9, AUTO_PROBE_TO = 21; // 自动补锚时段（北京时间）
+const AUTO_PROBE_IDLE_MIN_MS = Number(process.env.AUTO_PROBE_IDLE_MS || 8 * 60 * 1000); // 连续空闲判定窗
+const AUTO_PROBE_COOLDOWN_MS = 90 * 60 * 1000; // 两次自动补锚最短间隔
+const AUTO_PROBE_MAX_PER_DAY = 3;              // 每日自动补锚上限（成本护栏）
 const BEIJING = "Asia/Shanghai";
 
 const mode = process.argv[2] || "";
@@ -191,7 +198,7 @@ function ocxSnap(j) {
     secondary: q.weeklyPercent != null && q.weeklyResetAt ? { used_percent: q.weeklyPercent, resets_at: q.weeklyResetAt } : null,
     credits: { has_credits: bal != null, balance: bal },
   };
-  return { rl, ts: now(), updatedAt: q.updatedAt || null, resetCredits: q.resetCredits ?? null };
+  return { rl, ts: now(), updatedAt: q.updatedAt || null, resetCredits: q.resetCredits ?? null, observedAt: q.shortObservedAt ?? null, windowSeconds: q.shortWindowSeconds || 18000 };
 }
 async function fetchOcxQuota(allowRefresh) {
   const token = ocxToken();
@@ -239,9 +246,33 @@ function usageEvents(st, snap) {
   }
   return out;
 }
-function inQuietHours() {
-  const h = Number(new Intl.DateTimeFormat("en-US", { timeZone: BEIJING, hour: "2-digit", hour12: false }).format(new Date()));
-  return h >= 23 || h < 8;
+function beijingHour() { return Number(new Intl.DateTimeFormat("en-US", { timeZone: BEIJING, hour: "2-digit", hour12: false }).format(new Date())); }
+function inQuietHours() { const h = beijingHour(); return h >= 23 || h < 8; }
+// 空闲窗口判定：relay 对「无活动窗口」报 reset = 观测时刻 + 整窗长（2026-10-13 实测会随刷新滑动）；
+// 真锚定后该差值 < 整窗长并持续缩小。rollout 快照无 observedAt → 不触发。
+function windowIdle(snap) {
+  const p = snap?.rl?.primary, obs = snap?.observedAt, win = snap?.windowSeconds || 18000;
+  if (!p || !p.resets_at || obs == null) return false;
+  return (p.resets_at - obs / 1000) >= win - 10;
+}
+// 自动补锚：09:00–21:00 且窗口空闲时，连续判闲 ≥8min 后探一次（探完锚点落下，条件自失效，天然不循环）
+async function maybeAutoAnchor(st, snap) {
+  const p = snap.rl?.primary;
+  const idle = p && p.used_percent === 0 && windowIdle(snap);
+  const h = beijingHour();
+  if (!idle || h < AUTO_PROBE_FROM || h >= AUTO_PROBE_TO) { if (st.idleFirstSeen) { st.idleFirstSeen = null; saveState(st); } return false; }
+  if (!st.idleFirstSeen) { st.idleFirstSeen = now(); saveState(st); log("auto-anchor: window idle, watching..."); return false; }
+  if (now() - st.idleFirstSeen < AUTO_PROBE_IDLE_MIN_MS) return false;
+  const today = new Date().toLocaleDateString("zh-CN", { timeZone: BEIJING });
+  const cnt = st.autoProbeDay && st.autoProbeDay.date === today ? st.autoProbeDay.count : 0;
+  if (cnt >= AUTO_PROBE_MAX_PER_DAY) { log("auto-anchor: daily cap reached, skip"); return false; }
+  if (now() - (st.lastAutoProbe || 0) < AUTO_PROBE_COOLDOWN_MS) { log("auto-anchor: cooldown, skip"); return false; }
+  if (process.env.AUTO_PROBE_DRYRUN === "1") { log("[dryrun] auto-anchor would probe now"); return false; }
+  st.lastAutoProbe = now(); st.autoProbeDay = { date: today, count: cnt + 1 }; st.idleFirstSeen = null; saveState(st);
+  log(`auto-anchor: idle confirmed, probing (${cnt + 1}/${AUTO_PROBE_MAX_PER_DAY})...`);
+  const ok = await probeWithRetry();
+  log(ok ? "auto-anchor: probe done, window claimed" : "auto-anchor: probe failed");
+  return ok;
 }
 async function flushUsage(st, fresh) {
   const items = [...(st.pendingUsage || []), ...fresh];
@@ -271,6 +302,7 @@ async function morning() {
   const p = snap.rl.primary;
   const anchored = p ? (p.used_percent === 0 || p.resets_at * 1000 - snap.ts >= 4.8 * 3.6e6) : false; // 新鲜锚定：0% 或重置点距快照≈满 5h
   const ocx = await fetchOcxQuota(true); // 账户重置卡余额（零额度消耗的观测读）
+  st.lastAutoProbe = now(); // 明确探测过：自动补锚的冷却从这次起算，避免 14:05 后立刻重复锚定
   recordSample(st, snap);
   await sendPush(buildDailyCard(snap.rl, snap.ts, st, anchored, ocx?.resetCredits ?? null));
   saveState(st);
@@ -307,6 +339,11 @@ async function monitor() {
   const snapAgeMin = Math.round((now() - snap.ts) / 6e4);
   if (src === "rollout" && snapAgeMin > 60) { log("stale rollout snapshot " + snapAgeMin + "m, skip"); return; }
   const st = loadState();
+  // 空闲窗口自动补锚（09:00–21:00）：重置/到期只清零不锚定，补一次请求把窗口锚在当下
+  if (await maybeAutoAnchor(st, snap)) {
+    const fresh = await fetchOcxQuota(true);
+    if (fresh) { snap = fresh; src = "ocx"; }
+  }
   recordSample(st, snap);
   const freshEvents = usageEvents(st, snap);
   if (process.env.USAGE_TEST === "1") freshEvents.push({ title: "🔄 Codex 重置卡被使用", body: "（自检）模拟消耗 1 张｜剩余 3 张" });
