@@ -53,6 +53,26 @@ function saveState(s) {
   writeFileSync(STATE_PATH, JSON.stringify(s));
 }
 
+// 窗口去重键的稳定性（2026-10-13 修复）：API 报的 resets_at 会在同一窗口内小幅漂移
+// （实测 5h 窗口内漂 1s〜11min），直接用 resets_at 当键→每次漂移都变成“新窗口”→闸门重新武装→重复告警。
+const WINDOW_JITTER_SEC = 30 * 60; // 重置点差 ≤30min 视为同一窗口（真新窗口差 5h/数天）
+function resolveWindow(st, field, prefix, resetSec, containers) {
+  if (resetSec == null) return null;
+  const cur = st[field];
+  if (cur && Math.abs(cur.resetSec - resetSec) <= WINDOW_JITTER_SEC) { cur.resetSec = resetSec; return cur.key; }
+  // 容错/迁移：已有同前缀 key 且重置点接近 → 沿用旧 key（升级当天不重报已报过的级别）
+  for (const c of containers || []) {
+    for (const k of Object.keys(c || {})) {
+      if (!k.startsWith(prefix + "|")) continue;
+      const v = Number(k.slice(prefix.length + 1));
+      if (Number.isFinite(v) && Math.abs(v - resetSec) <= WINDOW_JITTER_SEC) { st[field] = { key: k, resetSec }; return k; }
+    }
+  }
+  const key = prefix + "|" + resetSec;
+  st[field] = { key, resetSec };
+  return key;
+}
+
 // ---------- snapshot mining (same source as codex-quota.mjs) ----------
 function candidateFiles(maxDays = 2) {
   const out = [];
@@ -172,7 +192,7 @@ function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
   const today = new Date().toLocaleDateString("zh-CN", { timeZone: BEIJING });
   const dayCred = st.dayCredits[today];
   const dCred = credits && dayCred != null ? (credits - dayCred) : null;
-  const curKey = p ? `w|${p.resets_at}` : null; // 上一窗口峰值：排除当前（刚锚定）窗口，取其前一个
+  const curKey = p ? (st.win5?.key || `w|${p.resets_at}`) : null; // 上一窗口峰值：排除当前（刚锚定）窗口，取其前一个
   const prevPeak = Object.entries(st.peaks).filter(([k]) => k !== curKey).sort((a, b) => Number(b[0].split("|")[1]) - Number(a[0].split("|")[1]))[0];
   const peak = prevPeak ? prevPeak[1] : null;
   const title = anchored ? "⚓ Codex 窗口已锚定（自动补锚）" : "⏱ Codex 窗口进行中";
@@ -191,7 +211,7 @@ function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
 const OCX_QUOTA_URL = "http://127.0.0.1:10100/api/codex-auth/quota";
 const OCX_REFRESH_URL = "http://127.0.0.1:10100/api/codex-auth/accounts/refresh";
 const OCX_RESET_CREDITS_URL = "http://127.0.0.1:10100/api/codex-auth/reset-credits?accountId=__main__";
-const OCX_STALE_MS = 15 * 60 * 1000;
+const OCX_STALE_MS = 5 * 60 * 1000; // 缓存超过 5 分钟就主动刷新（观测性、零额度）——15min 太松，阈值穿越会被漏报（2026-10-13 实测 78% vs 真实 91%）
 const EXPIRY_WARN_DAYS = 7; // 重置卡到期提醒阈值（天）
 function ocxToken() { try { return readFileSync(join(homedir(), ".opencodex/admin-api-token"), "utf8").trim(); } catch { return ""; } }
 function ocxSnap(j) {
@@ -350,10 +370,12 @@ async function maybeExpiryReminder(st) {
 // ---------- sampling & alerts ----------
 function recordSample(st, snap) {
   const p = snap.rl.primary, s = snap.rl.secondary;
-  st.samples.push({ t: snap.ts, p5: p?.used_percent ?? null, w5: p?.resets_at ?? null, pw: s?.used_percent ?? null, ww: s?.resets_at ?? null, cr: snap.rl.credits?.has_credits ? Number(snap.rl.credits.balance) : null });
-  // per-window peak tracking (key: resets_at of the window the sample belongs to)
-  if (p) {
-    const winKey = `w|${p.resets_at}`;
+  const k5 = p ? resolveWindow(st, "win5", "w", p.resets_at, [st.windowAlerts, st.peaks]) : null;
+  const kw = s ? resolveWindow(st, "winwk", "wk", s.resets_at, [st.windowAlerts]) : null;
+  st.samples.push({ t: snap.ts, p5: p?.used_percent ?? null, w5: p?.resets_at ?? null, k: k5, pw: s?.used_percent ?? null, ww: s?.resets_at ?? null, kw, cr: snap.rl.credits?.has_credits ? Number(snap.rl.credits.balance) : null });
+  // per-window peak tracking (key: resolved window key, drift-proof)
+  if (p && k5) {
+    const winKey = k5;
     st.peaks[winKey] = Math.max(st.peaks[winKey] ?? 0, p.used_percent);
     const keys = Object.keys(st.peaks);
     if (keys.length > 4) keys.sort((a, b) => Number(a.split("|")[1]) - Number(b.split("|")[1])).slice(0, keys.length - 4).forEach((k) => delete st.peaks[k]);
@@ -394,7 +416,7 @@ async function monitor() {
   await flushUsage(st, freshEvents);
   const p = snap.rl.primary;
   if (!p) { saveState(st); return; }
-  const winKey = `w|${p.resets_at}`;
+  const winKey = st.win5?.key || `w|${p.resets_at}`;
   st.windowAlerts[winKey] = st.windowAlerts[winKey] || [];
   const alerted = st.windowAlerts[winKey];
   const lines = [];
@@ -413,7 +435,7 @@ async function monitor() {
   }
 
   if (!card && now() - st.burnLast > BURN_COOLDOWN_MS) {
-    const recent = st.samples.filter((x) => x.t >= now() - BURN_WINDOW_MIN * 6e4 && x.p5 != null && x.w5 === p.resets_at); // 仅同窗口：跨重置取样本会把真实爬升稀释（重置后 first 可能拿到重置前高值）
+    const recent = st.samples.filter((x) => x.t >= now() - BURN_WINDOW_MIN * 6e4 && x.p5 != null && (x.k ? x.k === winKey : x.w5 === p.resets_at)); // 仅同窗口：跨重置取样本会把真实爬升稀释（重置后 first 可能拿到重置前高值）
     if (recent.length >= 2) {
       const first = recent[0], last = recent[recent.length - 1];
       const jump = last.p5 - first.p5;
@@ -430,7 +452,7 @@ async function monitor() {
   // weekly window alerts (2026-10-13): level gates one-shot per week + 3h burn projection
   const sw = snap.rl.secondary;
   if (!card && sw && sw.used_percent != null && sw.resets_at) {
-    const wkey = "wk|" + sw.resets_at;
+    const wkey = st.winwk?.key || "wk|" + sw.resets_at;
     const isFirst = !st.windowAlerts[wkey];
     const wAlerted = (st.windowAlerts[wkey] = st.windowAlerts[wkey] || []);
     for (const lv of [50, 75, 90]) if (isFirst && sw.used_percent >= lv && !wAlerted.includes(String(lv))) wAlerted.push(String(lv));
@@ -443,7 +465,7 @@ async function monitor() {
       }
     }
     if (!card && now() - (st.wkBurnLast || 0) > 6 * 3.6e6) {
-      const wRecent = st.samples.filter((x) => x.t >= now() - 3 * 3.6e6 && x.pw != null && x.ww === sw.resets_at); // 仅同周窗口
+      const wRecent = st.samples.filter((x) => x.t >= now() - 3 * 3.6e6 && x.pw != null && (x.kw ? x.kw === wkey : x.ww === sw.resets_at)); // 仅同周窗口
       if (wRecent.length >= 2) {
         const wJump = wRecent[wRecent.length - 1].pw - wRecent[0].pw;
         if (wJump >= 10) {
@@ -502,9 +524,24 @@ async function cardTest() {
   console.log(JSON.stringify(buildExpiryCard({ exp: now() + days * 864e5, daysLeft: days }, 3), null, 2));
 }
 
+// ---------- self-test: 窗口键漂移鲁棒性 ----------
+function windowTest() {
+  const st = {};
+  const seq = [1791886824, 1791887504, 1791887725, 1791887724, 1791887724];
+  for (const r of seq) console.log("reset", r, "->", resolveWindow(st, "win5", "w", r, []));
+  const nw = 1791887724 + 18000;
+  console.log("reset", nw, "(真·新窗口 +5h) ->", resolveWindow(st, "win5", "w", nw, []));
+  const st2 = { windowAlerts: { "w|1791887504": ["60"], "wk|1792474524": ["50"] } };
+  const k1 = resolveWindow(st2, "win5", "w", 1791887724, [st2.windowAlerts]);
+  const k2 = resolveWindow(st2, "winwk", "wk", 1792474524, [st2.windowAlerts]);
+  console.log("迁移 5h ->", k1, "| 已报级别:", st2.windowAlerts[k1]);
+  console.log("迁移 wk ->", k2, "| 已报级别:", st2.windowAlerts[k2]);
+}
+
 // ---------- main ----------
 try {
-  if (process.env.CARD_TEST === "1") await cardTest();
+  if (process.env.WINDOW_TEST === "1") windowTest();
+  else if (process.env.CARD_TEST === "1") await cardTest();
   else if (process.env.BURN_TEST === "1") await burnedTest();
   else if (mode === "monitor") await monitor();
   else { console.error("usage: codex-anchor.mjs monitor"); process.exit(2); }
