@@ -129,7 +129,7 @@ function remainStr(resetsSec) {
   const h = Math.floor(ms / 3.6e6), m = Math.round((ms % 3.6e6) / 6e4);
   return h > 0 ? `还剩 ${h}h${m}m` : `还剩 ${m}m`;
 }
-function buildDailyCard(rl, snapTs, st, anchored) {
+function buildDailyCard(rl, snapTs, st, anchored, resetCredits = null) {
   const p = rl.primary, s = rl.secondary;
   const ageMin = Math.max(0, Math.round((now() - snapTs) / 6e4));
   const credits = rl.credits?.has_credits ? Number(rl.credits.balance).toFixed(2) : null;
@@ -143,6 +143,7 @@ function buildDailyCard(rl, snapTs, st, anchored) {
     `**5h 窗口**：已用 ${p ? p.used_percent : "?"}%｜${p ? `${fmtT(p.resets_at * 1000)} 重置（${remainStr(p.resets_at)}）` : "无数据"}`,
     `**周窗口**：已用 ${s ? s.used_percent : "?"}%｜${s ? `${fmtDT(s.resets_at * 1000)} 重置` : "无数据"}`,
     credits ? `**Credits**：$${credits}${dCred != null ? `（今日 ${dCred >= 0 ? "+" : ""}$${dCred.toFixed(2)}）` : ""}` : null,
+    resetCredits != null ? `**重置卡**：${resetCredits} 张` : null,
     peak != null ? `**上一窗口峰值**：${peak}%` : null,
     `快照：${fmtT(snapTs)}（${ageMin} 分钟前）`,
   ].filter(Boolean);
@@ -244,8 +245,9 @@ async function morning() {
   if (!snap) { await sendFailureCard("probe 成功但本地未找到 rate_limits 快照"); process.exitCode = 1; return; }
   const p = snap.rl.primary;
   const anchored = p ? (p.used_percent === 0 || p.resets_at * 1000 - snap.ts >= 4.8 * 3.6e6) : false; // 新鲜锚定：0% 或重置点距快照≈满 5h
+  const ocx = await fetchOcxQuota(true); // 账户重置卡余额（零额度消耗的观测读）
   recordSample(st, snap);
-  await sendPush(buildDailyCard(snap.rl, snap.ts, st, anchored));
+  await sendPush(buildDailyCard(snap.rl, snap.ts, st, anchored, ocx?.resetCredits ?? null));
   saveState(st);
   log("morning card sent", anchored ? "(anchored)" : "(in-window)");
 }
