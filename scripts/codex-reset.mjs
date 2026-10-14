@@ -77,6 +77,36 @@ async function notify(card) {
   return send(card);
 }
 
+// Credits 单位是「积分」，不是美元（2026-10-14 用户定案：500 积分 ≈ 20 美元）。人民币按实时汇率换算。
+const CREDITS_PER_USD = 25;
+const FX_CACHE_PATH = join(homedir(), "my-assistant/state/fx-usd-cny.json");
+let USD_CNY = 6.70, FX_ASOF = "兜底值";
+const fmtCredits = (cr) => {
+  if (cr == null || cr === "?" || !Number.isFinite(Number(cr))) return "?";
+  const usd = Number(cr) / CREDITS_PER_USD;
+  return `${Number(cr).toFixed(2)} 积分（≈$${usd.toFixed(2)} / ¥${(usd * USD_CNY).toFixed(2)}）`;
+};
+async function refreshFx() {
+  try {
+    const c = JSON.parse(readFileSync(FX_CACHE_PATH, "utf8"));
+    if (Number.isFinite(c?.rate) && c.rate > 0 && Date.now() - c.at < 12 * 3600e3) { USD_CNY = c.rate; FX_ASOF = c.date || "缓存"; return; }
+  } catch { /* no cache */ }
+  try {
+    const r = await fetch("https://open.er-api.com/v6/latest/USD", { signal: AbortSignal.timeout(6000) });
+    const rate = Number((await r.json())?.rates?.CNY);
+    if (Number.isFinite(rate) && rate > 0) {
+      USD_CNY = rate; FX_ASOF = new Date().toISOString().slice(0, 10);
+      try { writeFileSync(FX_CACHE_PATH, JSON.stringify({ rate, date: FX_ASOF, at: Date.now() })); } catch { /* best-effort */ }
+      return;
+    }
+  } catch { /* offline */ }
+  try {
+    const c = JSON.parse(readFileSync(FX_CACHE_PATH, "utf8"));
+    if (Number.isFinite(c?.rate) && c.rate > 0) { USD_CNY = c.rate; FX_ASOF = (c.date || "缓存") + "(旧)"; return; }
+  } catch { /* nothing */ }
+  FX_ASOF = "兜底值";
+}
+
 function statusText(accountId, q, rc) {
   const short = q ? q.shortPercent : "?";
   const weekly = q ? q.weeklyPercent : "?";
@@ -89,7 +119,7 @@ function statusText(accountId, q, rc) {
     "账号: " + accountId,
     `5h 窗口: ${short}%（${shortReset} 重置）`,
     `周窗口: ${weekly}%（${weeklyReset} 重置）`,
-    `Credits: $${bal}`,
+    `Credits: ${fmtCredits(bal)}`,
     `重置卡: 剩余 ${n} 张（到期 ${exp}）`,
   ].join("\n");
 }
@@ -97,6 +127,7 @@ function statusText(accountId, q, rc) {
 async function main() {
   if (!token()) { console.error("缺少 ~/.opencodex/admin-api-token"); process.exit(1); }
   const { accountId, q } = await getQuota();
+  await refreshFx();
   const rc = await getResetCredits(accountId).catch((e) => ({ error: e.message }));
 
   if (!wantConsume) {
@@ -127,7 +158,7 @@ async function main() {
     ok ? "✅ 重置成功" : "⚠️ 结果待确认（" + ((res.body && (res.body.code || res.body.error)) || res.status) + "）",
     `5h 窗口: ${q2 ? q2.shortPercent : "?"}%（${q2 && q2.shortResetAt ? fmtT(q2.shortResetAt * 1000) : "?"} 重置）`,
     `周窗口: ${q2 ? q2.weeklyPercent : "?"}%`,
-    `Credits: $${q2 && q2.credits ? Number(q2.credits.balance).toFixed(2) : "?"}`,
+    `Credits: ${fmtCredits(q2 && q2.credits ? Number(q2.credits.balance) : null)}`,
     `重置卡: 剩余 ${newCards} 张${beforeCards != null && newCards !== "?" ? "（本次 -" + (beforeCards - newCards) + "）" : ""}`,
   ].join("\n");
 

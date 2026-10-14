@@ -198,6 +198,37 @@ function levelCardWeek(lvl, usedPct, resetSec, p5, test = false) {
   const tpl = lvl >= 90 ? ["red", "🔴"] : lvl >= 75 ? ["orange", "🟠"] : ["yellow", "🟡"];
   return { header: { template: tpl[0], title: { tag: "plain_text", content: (test ? "【测试】" : "") + `${tpl[1]} Codex 周额度已用 ${usedPct}%` } }, elements: [{ tag: "markdown", content: `周窗口已用 **${usedPct}%**（${fmtDT(resetSec * 1000)} 重置）\n已越过 **${lvl}%** 告警线\n5h 窗口已用 ${p5}%` }] };
 }
+// Credits 单位是「积分」，不是美元（2026-10-14 用户定案：500 积分 ≈ 20 美元 → 1 美元 ≈ 25 积分）。
+// 主单位一律显示积分，美元/人民币只作括号内换算（人民币按实时汇率：缓存 12h，失败回退旧值/常量）。
+const CREDITS_PER_USD = 25;
+const FX_CACHE_PATH = join(homedir(), "my-assistant/state/fx-usd-cny.json");
+const FX_FALLBACK = 6.70;
+let USD_CNY = FX_FALLBACK, FX_ASOF = "兜底值";
+const usdOf = (cr) => Number(cr) / CREDITS_PER_USD;
+const fmtMoney = (cr) => `≈$${usdOf(cr).toFixed(2)} / ¥${(usdOf(cr) * USD_CNY).toFixed(2)}`;
+const fmtCredits = (cr) => `${Number(cr).toFixed(2)} 积分（${fmtMoney(cr)}）`;
+// 取实时 USD→CNY：缓存 <12h 直接用；过期再联网；联网失败退回过期缓存/常量
+async function refreshFx() {
+  try {
+    const c = JSON.parse(readFileSync(FX_CACHE_PATH, "utf8"));
+    if (Number.isFinite(c?.rate) && c.rate > 0 && now() - c.at < 12 * 3600e3) { USD_CNY = c.rate; FX_ASOF = c.date || "缓存"; return; }
+  } catch { /* no cache */ }
+  try {
+    const r = await fetch("https://open.er-api.com/v6/latest/USD", { signal: AbortSignal.timeout(6000) });
+    const rate = Number((await r.json())?.rates?.CNY);
+    if (Number.isFinite(rate) && rate > 0) {
+      USD_CNY = rate; FX_ASOF = new Date().toISOString().slice(0, 10);
+      try { mkdirSync(dirname(FX_CACHE_PATH), { recursive: true }); writeFileSync(FX_CACHE_PATH, JSON.stringify({ rate, date: FX_ASOF, at: now() })); } catch { /* best-effort */ }
+      return;
+    }
+  } catch { /* offline */ }
+  try {
+    const c = JSON.parse(readFileSync(FX_CACHE_PATH, "utf8"));
+    if (Number.isFinite(c?.rate) && c.rate > 0) { USD_CNY = c.rate; FX_ASOF = (c.date || "缓存") + "(旧)"; return; }
+  } catch { /* nothing */ }
+  FX_ASOF = "兜底值";
+}
+
 // 状态卡（原日报卡格式，2026-10-13 并入自动补锚卡；锚定/事件复用同一格式）
 function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
   const p = rl.primary, s = rl.secondary;
@@ -206,6 +237,9 @@ function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
   const today = new Date().toLocaleDateString("zh-CN", { timeZone: BEIJING });
   const dayCred = st.dayCredits[today];
   const dCred = credits && dayCred != null ? (credits - dayCred) : null;
+  const dSign = dCred == null ? "" : dCred > 0 ? "+" : dCred < 0 ? "-" : "";
+  const dUsd = dCred == null ? 0 : Math.abs(dCred) / CREDITS_PER_USD;
+  const dCredStr = dCred == null ? "" : `｜今日 ${dSign}${Math.abs(dCred).toFixed(2)} 积分（${dSign}$${dUsd.toFixed(2)} / ${dSign}¥${(dUsd * USD_CNY).toFixed(2)}）`;
   const curKey = p ? (st.win5?.key || `w|${p.resets_at}`) : null; // 上一窗口峰值：排除当前（刚锚定）窗口，取其前一个
   const prevPeak = Object.entries(st.peaks).filter(([k]) => k !== curKey).sort((a, b) => Number(b[0].split("|")[1]) - Number(a[0].split("|")[1]))[0];
   const peak = prevPeak ? prevPeak[1] : null;
@@ -213,10 +247,10 @@ function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
   const lines = [
     `**5h 窗口**：已用 ${p ? p.used_percent : "?"}%｜${p ? `${fmtT(p.resets_at * 1000)} 重置（${remainStr(p.resets_at)}）` : "无数据"}`,
     `**周窗口**：已用 ${s ? s.used_percent : "?"}%｜${s ? `${fmtDT(s.resets_at * 1000)} 重置` : "无数据"}`,
-    credits ? `**Credits**：$${credits}${dCred != null ? `（今日 ${dCred >= 0 ? "+" : ""}$${dCred.toFixed(2)}）` : ""}` : null,
+    credits ? `**Credits**：${fmtCredits(credits)}${dCredStr}` : null,
     resetCredits != null ? `**重置卡**：${resetCredits} 张` : null,
     peak != null ? `**上一窗口峰值**：${peak}%` : null,
-    `快照：${fmtT(snapTs)}（${ageMin} 分钟前）`,
+    `快照：${fmtT(snapTs)}（${ageMin} 分钟前）${credits ? `｜汇率 1$=${USD_CNY.toFixed(3)}¥（${FX_ASOF}）` : ""}`,
   ].filter(Boolean);
   return { header: { template: p && p.used_percent >= 80 ? "orange" : "green", title: { tag: "plain_text", content: title } }, elements: [{ tag: "markdown", content: lines.join("\n") }] };
 }
@@ -304,7 +338,7 @@ function usageEvents(st, snap) {
       const d = st.seenCredits - cr;
       if (d >= 0.001) {
         // alert:true → 这张除通知群外，额外推一份到告警群（2026-10-13 用户定案）
-        out.push({ title: "💳 Codex Credits 被消耗", body: `Credits 被消耗 **$${d.toFixed(4)}**｜余额 **$${cr.toFixed(2)}**`, alert: true });
+        out.push({ title: "💳 Codex Credits 被消耗", body: `积分被消耗 **${d.toFixed(2)} 分**（${fmtMoney(d)}）｜余额 **${cr.toFixed(2)} 积分**（${fmtMoney(cr)}）`, alert: true });
         st.seenCredits = cr;
       } else if (d < 0) st.seenCredits = cr; // 充值/回补：静默同步
     }
@@ -422,6 +456,7 @@ function recordSample(st, snap) {
 }
 
 async function monitor() {
+  await refreshFx();
   // 24/7：不区分工作日与时段，缓存读快照零请求
   let snap = await fetchOcxQuota(true);
   let src = "ocx";
@@ -551,6 +586,7 @@ async function burnedTest() {
 
 // ---------- self-test: 打印状态卡 + 到期提醒卡（不发卡；另做真实路径只读校验）----------
 async function cardTest() {
+  await refreshFx();
   const real = await fetchResetCredits();
   const realEc = expiringCredit(real);
   console.log("real reset-credits:", real ? `${real.available_count} 张` : "读取失败");
