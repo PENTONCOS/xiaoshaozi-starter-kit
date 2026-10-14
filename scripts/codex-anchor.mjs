@@ -2,7 +2,8 @@
 // codex-anchor — Codex 5h 窗口锚定 + 余量监控. Zero-LLM (仅 spawn codex CLI 探测).
 //
 // 锚定     : 无固定定时探测。09:00–21:00 且 5h 窗口处于「空闲未认领」（relay 报 reset = 观测时刻 + 整窗长）时，
-//            连续两次判空闲（≥8min）后自动探一次，把窗口锚在当下；90min 冷却 + 6 次/天上限兜成本。
+//            判闲即探（2026-10-14 用户定案：去掉「连续空闲 ≥8min」等待），把窗口锚在当下；
+//            90min 冷却 + 6 次/天上限兜成本。调度上保证每天 09:00 有一跳（整点对齐 :00/:10/…/:50）。
 //            依据：重置/自然到期只清零、不锚定，空闲窗口只有发请求才认领锚点（2026-10-13 实测）。
 // 状态卡   : 每次自动补锚成功 → 推一张状态卡到通知群（5h/周窗口、Credits、上一窗口峰值、ΔCredits、重置卡余额）。
 //            （原 09:00/14:05 固定日报卡已于 2026-10-13 退休，格式并入此卡——用户定案：固定探测逻辑改用自动补锚。）
@@ -14,7 +15,7 @@
 //            Credits 被消耗 → 告警群（getSender "alert"，不进通知群；2026-10-13 用户定案）；
 //            余量/燃烧过快/失败卡 → 告警群（getSender "alert"）。
 // 到期提醒 : 监控每轮读 reset-credits，最近一张卡 ≤7 天到期且未提醒过 → 单独推一条（按 expires_at 去重）。
-// 调度     : monitor 24/7 每 10 分钟；不区分工作日与时段（2026-10-12 定案）。
+// 调度     : monitor 24/7 每 10 分钟（整点对齐 :00/:10/…/:50，含 09:00 一跳）；不区分工作日与时段（2026-10-12 定案）。
 
 import { readdirSync, statSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -32,7 +33,7 @@ const PRE_WARN_PP = 75;         // 5h 提前哨档位（2026-10-13 用户从 60 
 const BURN_COOLDOWN_MS = 45 * 60 * 1000;
 const FAIL_COOLDOWN_MS = 60 * 60 * 1000;
 const AUTO_PROBE_FROM = 9, AUTO_PROBE_TO = 21; // 自动补锚时段（北京时间）
-const AUTO_PROBE_IDLE_MIN_MS = Number(process.env.AUTO_PROBE_IDLE_MS || 8 * 60 * 1000); // 连续空闲判定窗
+const AUTO_PROBE_IDLE_MIN_MS = Number(process.env.AUTO_PROBE_IDLE_MS ?? 0); // 去抖窗（2026-10-14 用户定案改为 0 = 判闲即探；设 >0 可恢复等待）
 const AUTO_PROBE_COOLDOWN_MS = 90 * 60 * 1000; // 两次自动补锚最短间隔
 const AUTO_PROBE_MAX_PER_DAY = 6;              // 每日自动补锚上限（成为主力后放宽；真正的成本闸门是「仅在真空闲时探」）
 const BEIJING = "Asia/Shanghai";
@@ -319,14 +320,17 @@ function windowIdle(snap) {
   if (!p || !p.resets_at || obs == null) return false;
   return (p.resets_at - obs / 1000) >= win - 10;
 }
-// 自动补锚：09:00–21:00 且窗口空闲时，连续判闲 ≥8min 后探一次（探完锚点落下，条件自失效，天然不循环）
+// 自动补锚：09:00–21:00 且窗口空闲时就探一次（探完锚点落下，条件自失效，天然不循环）
+// 去抖窗 AUTO_PROBE_IDLE_MIN_MS 默认 0：首轮判闲即探；设为 >0 则需连续判闲达窗才探。
 async function maybeAutoAnchor(st, snap) {
   const p = snap.rl?.primary;
   const idle = p && p.used_percent === 0 && windowIdle(snap);
   const h = beijingHour();
   if (!idle || h < AUTO_PROBE_FROM || h >= AUTO_PROBE_TO) { if (st.idleFirstSeen) { st.idleFirstSeen = null; saveState(st); } return false; }
-  if (!st.idleFirstSeen) { st.idleFirstSeen = now(); saveState(st); log("auto-anchor: window idle, watching..."); return false; }
-  if (now() - st.idleFirstSeen < AUTO_PROBE_IDLE_MIN_MS) return false;
+  if (AUTO_PROBE_IDLE_MIN_MS > 0) { // 去抖（默认关闭）
+    if (!st.idleFirstSeen) { st.idleFirstSeen = now(); saveState(st); log("auto-anchor: window idle, watching..."); return false; }
+    if (now() - st.idleFirstSeen < AUTO_PROBE_IDLE_MIN_MS) return false;
+  }
   const today = new Date().toLocaleDateString("zh-CN", { timeZone: BEIJING });
   const cnt = st.autoProbeDay && st.autoProbeDay.date === today ? st.autoProbeDay.count : 0;
   if (cnt >= AUTO_PROBE_MAX_PER_DAY) { log("auto-anchor: daily cap reached, skip"); return false; }
