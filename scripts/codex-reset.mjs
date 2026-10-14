@@ -77,15 +77,16 @@ async function notify(card) {
   return send(card);
 }
 
-// Credits 单位是「积分」，不是美元（2026-10-14 用户定案：500 积分 ≈ 20 美元）。符号：积分 🪙 / $ / ¥（人民币实时汇率）。
-const CREDIT_SYM = "🪙";
+// Credits 单位是「积分」，不是美元（2026-10-14 用户定案：500 积分 ≈ 20 美元）。符号：积分 💎（放数字前）/ $ / ¥（人民币实时汇率）。
+const CREDIT_SYM = "💎";
+const CARD_SYM = "🎫"; // 重置卡图标（放数字前）
 const CREDITS_PER_USD = 25;
 const FX_CACHE_PATH = join(homedir(), "my-assistant/state/fx-usd-cny.json");
 let USD_CNY = 6.70, FX_ASOF = "兜底值";
 const fmtCredits = (cr) => {
   if (cr == null || cr === "?" || !Number.isFinite(Number(cr))) return "?";
   const usd = Number(cr) / CREDITS_PER_USD;
-  return `${Number(cr).toFixed(2)} ${CREDIT_SYM}（$${usd.toFixed(2)} · ¥${(usd * USD_CNY).toFixed(2)}）`;
+  return `${CREDIT_SYM} ${Number(cr).toFixed(2)}（$${usd.toFixed(2)} · ¥${(usd * USD_CNY).toFixed(2)}）`;
 };
 async function refreshFx() {
   try {
@@ -121,7 +122,7 @@ function statusText(accountId, q, rc) {
     `5h 窗口: ${short}%（${shortReset} 重置）`,
     `周窗口: ${weekly}%（${weeklyReset} 重置）`,
     `Credits: ${fmtCredits(bal)}`,
-    `重置卡: 剩余 ${n} 张（到期 ${exp}）`,
+    `重置卡: ${CARD_SYM} ${n} 张（到期 ${exp}）`,
   ].join("\n");
 }
 
@@ -160,7 +161,7 @@ async function main() {
     `5h 窗口: ${q2 ? q2.shortPercent : "?"}%（${q2 && q2.shortResetAt ? fmtT(q2.shortResetAt * 1000) : "?"} 重置）`,
     `周窗口: ${q2 ? q2.weeklyPercent : "?"}%`,
     `Credits: ${fmtCredits(q2 && q2.credits ? Number(q2.credits.balance) : null)}`,
-    `重置卡: 剩余 ${newCards} 张${beforeCards != null && newCards !== "?" ? "（本次 -" + (beforeCards - newCards) + "）" : ""}`,
+    `重置卡: ${CARD_SYM} ${newCards} 张${beforeCards != null && newCards !== "?" ? "（本次 -" + (beforeCards - newCards) + "）" : ""}`,
   ].join("\n");
 
   if (asJson) log(JSON.stringify({ ok, consume: res, quota: q2, resetCredits: rc2 }, null, 2));

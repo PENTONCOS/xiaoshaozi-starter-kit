@@ -199,15 +199,17 @@ function levelCardWeek(lvl, usedPct, resetSec, p5, test = false) {
   return { header: { template: tpl[0], title: { tag: "plain_text", content: (test ? "【测试】" : "") + `${tpl[1]} Codex 周额度已用 ${usedPct}%` } }, elements: [{ tag: "markdown", content: `周窗口已用 **${usedPct}%**（${fmtDT(resetSec * 1000)} 重置）\n已越过 **${lvl}%** 告警线\n5h 窗口已用 ${p5}%` }] };
 }
 // Credits 单位是「积分」，不是美元（2026-10-14 用户定案：500 积分 ≈ 20 美元 → 1 美元 ≈ 25 积分）。
-// 三个单位均用符号表示：积分 🪙 / 美刀 $ / 人民币 ¥（人民币按实时汇率，缓存 12h，失败回退旧值/常量）。
-const CREDIT_SYM = "🪙";
+// 三个单位均用符号：积分 💎 / 美刀 $ / 人民币 ¥（人民币按实时汇率，缓存 12h）。
+// 2026-10-14 用户定案：积分符号一律放在数字前面。
+const CREDIT_SYM = "💎";
+const CARD_SYM = "🎫"; // 重置卡图标（2026-10-14 用户定案：重置卡也带图标，放数字前）
 const CREDITS_PER_USD = 25;
 const FX_CACHE_PATH = join(homedir(), "my-assistant/state/fx-usd-cny.json");
 const FX_FALLBACK = 6.70;
 let USD_CNY = FX_FALLBACK, FX_ASOF = "兜底值";
 const usdOf = (cr) => Number(cr) / CREDITS_PER_USD;
 const fmtMoney = (cr) => `$${usdOf(cr).toFixed(2)} · ¥${(usdOf(cr) * USD_CNY).toFixed(2)}`;
-const fmtCredits = (cr) => `${Number(cr).toFixed(2)} ${CREDIT_SYM}（${fmtMoney(cr)}）`;
+const fmtCredits = (cr) => `${CREDIT_SYM} ${Number(cr).toFixed(2)}（${fmtMoney(cr)}）`;
 // 取实时 USD→CNY：缓存 <12h 直接用；过期再联网；联网失败退回过期缓存/常量
 async function refreshFx() {
   try {
@@ -240,7 +242,7 @@ function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
   const dCred = credits && dayCred != null ? (credits - dayCred) : null;
   const dSign = dCred == null ? "" : dCred > 0 ? "+" : dCred < 0 ? "-" : "";
   const dUsd = dCred == null ? 0 : Math.abs(dCred) / CREDITS_PER_USD;
-  const dCredStr = dCred == null ? "" : `｜今日 ${dSign}${Math.abs(dCred).toFixed(2)} ${CREDIT_SYM}（${dSign}$${dUsd.toFixed(2)} · ${dSign}¥${(dUsd * USD_CNY).toFixed(2)}）`;
+  const dCredStr = dCred == null ? "" : `｜今日 ${CREDIT_SYM} ${dSign}${Math.abs(dCred).toFixed(2)}（${dSign}$${dUsd.toFixed(2)} · ${dSign}¥${(dUsd * USD_CNY).toFixed(2)}）`;
   const curKey = p ? (st.win5?.key || `w|${p.resets_at}`) : null; // 上一窗口峰值：排除当前（刚锚定）窗口，取其前一个
   const prevPeak = Object.entries(st.peaks).filter(([k]) => k !== curKey).sort((a, b) => Number(b[0].split("|")[1]) - Number(a[0].split("|")[1]))[0];
   const peak = prevPeak ? prevPeak[1] : null;
@@ -248,7 +250,8 @@ function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
   const lines = [
     `**5h 窗口**：已用 ${p ? p.used_percent : "?"}%｜${p ? `${fmtT(p.resets_at * 1000)} 重置（${remainStr(p.resets_at)}）` : "无数据"}`,
     `**周窗口**：已用 ${s ? s.used_percent : "?"}%｜${s ? `${fmtDT(s.resets_at * 1000)} 重置` : "无数据"}`,
-    credits ? `**Credits**：${fmtCredits(credits)}${dCredStr}` : null,    resetCredits != null ? `**重置卡**：${resetCredits} 张` : null,
+    credits ? `**Credits**：${fmtCredits(credits)}${dCredStr}` : null,
+    resetCredits != null ? `**重置卡**：${CARD_SYM} ${resetCredits} 张` : null,
     peak != null ? `**上一窗口峰值**：${peak}%` : null,
     `快照：${fmtT(snapTs)}（${ageMin} 分钟前）${credits ? `｜汇率 1$=${USD_CNY.toFixed(3)}¥（${FX_ASOF}）` : ""}`,
   ].filter(Boolean);
@@ -326,7 +329,7 @@ function usageEvents(st, snap) {
     else if (rc < st.seenResetCredits) {
       out.push({
         title: "🔄 Codex 重置卡被使用",
-        body: `重置卡被使用 **${st.seenResetCredits - rc}** 张｜剩余 **${rc}** 张\n5h 窗口已用 ${snap.rl.primary?.used_percent ?? "?"}%｜周窗口已用 ${snap.rl.secondary?.used_percent ?? "?"}%`,
+        body: `重置卡被使用 **${st.seenResetCredits - rc}** 张｜剩余 **${CARD_SYM} ${rc}** 张\n5h 窗口已用 ${snap.rl.primary?.used_percent ?? "?"}%｜周窗口已用 ${snap.rl.secondary?.used_percent ?? "?"}%`,
       });
       st.seenResetCredits = rc;
     } else if (rc > st.seenResetCredits) st.seenResetCredits = rc; // 新发卡：静默同步
@@ -338,7 +341,7 @@ function usageEvents(st, snap) {
       const d = st.seenCredits - cr;
       if (d >= 0.001) {
         // alert:true → 这张除通知群外，额外推一份到告警群（2026-10-13 用户定案）
-        out.push({ title: "💳 Codex 积分被消耗", body: `消耗 **${d.toFixed(2)} ${CREDIT_SYM}**（${fmtMoney(d)}）｜余额 **${cr.toFixed(2)} ${CREDIT_SYM}**（${fmtMoney(cr)}）`, alert: true });
+        out.push({ title: "💳 Codex 积分被消耗", body: `消耗 **${CREDIT_SYM} ${d.toFixed(2)}**（${fmtMoney(d)}）｜余额 **${CREDIT_SYM} ${cr.toFixed(2)}**（${fmtMoney(cr)}）`, alert: true });
         st.seenCredits = cr;
       } else if (d < 0) st.seenCredits = cr; // 充值/回补：静默同步
     }
@@ -488,7 +491,7 @@ async function monitor() {
     log("anchor status card sent");
   }
   const freshEvents = usageEvents(st, snap);
-  if (process.env.USAGE_TEST === "1") freshEvents.push({ title: "🔄 Codex 重置卡被使用", body: "（自检）模拟消耗 1 张｜剩余 3 张" });
+  if (process.env.USAGE_TEST === "1") freshEvents.push({ title: "🔄 Codex 重置卡被使用", body: `（自检）模拟消耗 1 张｜剩余 ${CARD_SYM} 3 张` });
   await flushUsage(st, freshEvents);
   const p = snap.rl.primary;
   if (!p) { saveState(st); return; }
@@ -579,7 +582,7 @@ async function creditTest() {
   const sc = buildStatusCard(rl, now(), st, true, 2);
   sc.header.title.content = "【测试】" + sc.header.title.content;
   await sendAlert(sc); log("test sent:", sc.header.title.content, "| \u6c47\u7387", USD_CNY.toFixed(4));
-  const cc = { header: { template: "red", title: { tag: "plain_text", content: "【测试】💳 Codex 积分被消耗" } }, elements: [{ tag: "markdown", content: `消耗 **${d.toFixed(2)} ${CREDIT_SYM}**（${fmtMoney(d)}）｜余额 **${cr.toFixed(2)} ${CREDIT_SYM}**（${fmtMoney(cr)}）` }] };
+  const cc = { header: { template: "red", title: { tag: "plain_text", content: "【测试】💳 Codex 积分被消耗" } }, elements: [{ tag: "markdown", content: `消耗 **${CREDIT_SYM} ${d.toFixed(2)}**（${fmtMoney(d)}）｜余额 **${CREDIT_SYM} ${cr.toFixed(2)}**（${fmtMoney(cr)}）` }] };
   await sendAlert(cc); log("test sent:", cc.header.title.content);
 }
 
