@@ -77,14 +77,15 @@ async function notify(card) {
   return send(card);
 }
 
-// Credits 单位是「积分」，不是美元（2026-10-14 用户定案：500 积分 ≈ 20 美元）。人民币按实时汇率换算。
+// Credits 单位是「积分」，不是美元（2026-10-14 用户定案：500 积分 ≈ 20 美元）。符号：积分 🪙 / $ / ¥（人民币实时汇率）。
+const CREDIT_SYM = "🪙";
 const CREDITS_PER_USD = 25;
 const FX_CACHE_PATH = join(homedir(), "my-assistant/state/fx-usd-cny.json");
 let USD_CNY = 6.70, FX_ASOF = "兜底值";
 const fmtCredits = (cr) => {
   if (cr == null || cr === "?" || !Number.isFinite(Number(cr))) return "?";
   const usd = Number(cr) / CREDITS_PER_USD;
-  return `${Number(cr).toFixed(2)} 积分（≈$${usd.toFixed(2)} / ¥${(usd * USD_CNY).toFixed(2)}）`;
+  return `${Number(cr).toFixed(2)} ${CREDIT_SYM}（$${usd.toFixed(2)} · ¥${(usd * USD_CNY).toFixed(2)}）`;
 };
 async function refreshFx() {
   try {
