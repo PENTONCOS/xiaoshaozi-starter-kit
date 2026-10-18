@@ -232,19 +232,17 @@ function textReport(result, windowLabel) {
 }
 
 function cardBlock(result, windowLabel) {
+    // 2026-10-18 用户定案：只列「本批次消耗的模型 + token」，去掉其余说明。
+    const merged = new Map();
+    const add = (m, t) => merged.set(m, (merged.get(m) || 0) + t);
     const oc = result.openclaw;
-    const lines = ["**模型消耗**" + (windowLabel ? `（${windowLabel}）` : "")];
-    if (oc && oc.tokens > 0) {
-        for (const m of oc.models) lines.push(`· 编排/编码 · ${m.model} — ${fmtTok(m.tokens)} tok · ${m.sessions} 会话`);
-    }
-    for (const m of result.models) {
-        const fail = m.fail ? `，${m.fail} 失败` : "";
-        lines.push(`· codex CLI · ${m.model} — **${(m.share * 100).toFixed(0)}%** · ${fmtTok(m.tokens)} tok · ${m.calls} 次${fail}`);
-    }
-    const ocTok = oc && oc.tokens ? oc.tokens : 0;
-    lines.push(`· 合计 **${fmtTok(ocTok + result.totalTokens)} tok**${result.excluded ? `（已剔除 ${result.excluded} 条后台调用）` : ""}`);
-    lines.push("");
-    lines.push("_口径：OpenClaw 编排/编码（会话快照差）+ 真实 codex CLI 工作流量；不含补锚探针、定时摘要等后台任务_");
+    if (oc && oc.tokens > 0) for (const m of oc.models) add(m.model, m.tokens);
+    for (const m of result.models) add(m.model, m.tokens);
+    const rows = [...merged.entries()].sort((a, b) => b[1] - a[1]);
+    const lines = ["**模型消耗**（本批次）"];
+    for (const [m, t] of rows) lines.push(`· ${m} — ${fmtTok(t)} tok`);
+    const total = rows.reduce((s, [, t]) => s + t, 0);
+    lines.push(`· 合计 **${fmtTok(total)} tok**`);
     return lines.join("\n");
 }
 
