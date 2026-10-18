@@ -147,7 +147,8 @@ function openclawDelta(markSnapshot, now) {
     let sessions = 0;
     for (const [key, cur] of Object.entries(now.byKey)) {
         const prev = before[key];
-        const delta = prev ? Math.max(0, cur.t - prev.t) : cur.t;
+        // 会话计数器会因压缩/重启归零：cur < prev 时按「归零后累计」计，而不是 0。
+        const delta = prev ? (cur.t >= prev.t ? cur.t - prev.t : cur.t) : cur.t;
         if (delta <= 0) continue;
         tokens += delta;
         sessions += 1;
