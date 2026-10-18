@@ -2,12 +2,15 @@
 /**
  * codex-usage-stat.mjs — zero-LLM model-usage breakdown for deploy cards.
  *
- * Source: ~/.opencodex/usage.jsonl (Codex CLI traffic through the ocx proxy).
- * Scope: covers `codex exec` work only. OpenClaw's own orchestration calls
- * (the agent model) are NOT routed through ocx and are NOT counted here.
+ * Source A: ~/.opencodex/usage.jsonl (Codex CLI traffic through the ocx proxy),
+ *           MINUS background calls marked in ~/.opencodex/background-calls.jsonl
+ *           (anchor probes, scheduled briefings — not deploy work).
+ * Source B: `openclaw sessions --json` — OpenClaw's own orchestration/agent tokens,
+ *           measured as the DELTA between two `mark` snapshots (session counters).
+ * 口径：只统计「本批次」真实工作流量；补锚探针 / 定时摘要等后台调用会被剔除。
  *
  * Usage:
- *   node codex-usage-stat.mjs mark [label]         snapshot the ledger position
+ *   node codex-usage-stat.mjs mark [label]         snapshot ledger position + OpenClaw sessions
  *   node codex-usage-stat.mjs report [--json]      aggregate since the last mark
  *   node codex-usage-stat.mjs report --all         aggregate the whole ledger
  *   node codex-usage-stat.mjs report --since <iso|epochMs>
@@ -19,10 +22,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 const HOME = os.homedir();
 const LEDGER = process.env.OCX_USAGE_LEDGER || path.join(HOME, ".opencodex", "usage.jsonl");
 const MARKS = process.env.OCX_USAGE_MARKS || path.join(HOME, ".opencodex", "usage-marks.jsonl");
+// 后台调用标记（补锚探针 / 定时摘要等）：由调用方在发请求前追加一行；统计时按「模型 + 时间窗」剔除。
+const BACKGROUND = process.env.OCX_USAGE_BACKGROUND || path.join(HOME, ".opencodex", "background-calls.jsonl");
+const BACKGROUND_WINDOW_MS = Number(process.env.OCX_BACKGROUND_WINDOW_MS || 180000);
 
 const fmtTs = (ms) => (ms ? new Date(Number(ms)).toISOString().replace("T", " ").slice(0, 19) + "Z" : "?");
 const fmtNum = (n) => Math.round(n).toLocaleString("en-US");
@@ -62,14 +69,106 @@ function readMarks() {
         .filter(Boolean);
 }
 
+function readBackground() {
+    if (!fs.existsSync(BACKGROUND)) return [];
+    return fs
+        .readFileSync(BACKGROUND, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+            try {
+                return JSON.parse(line);
+            } catch {
+                return null;
+            }
+        })
+        .filter(Boolean);
+}
+
+function rowIsBackground(row, markers) {
+    const model = row.model || "";
+    const requested = row.requestedModel || "";
+    const prefixed = `${row.provider || "?"}/${model}`;
+    for (const m of markers) {
+        if (!m || !m.model) continue;
+        if (m.model !== model && m.model !== requested && m.model !== prefixed) continue;
+        const d = row.timestamp - m.ts;
+        if (d >= -5000 && d <= BACKGROUND_WINDOW_MS) return true;
+    }
+    return false;
+}
+
+function findOpenclaw() {
+    const candidates = [
+        process.env.OPENCLAW_BIN,
+        path.join(HOME, ".openclaw/tmp/agent-cli/openclaw"),
+        "/usr/local/bin/openclaw",
+        "/opt/homebrew/bin/openclaw",
+    ].filter(Boolean);
+    for (const c of candidates) {
+        try {
+            if (fs.existsSync(c)) return c;
+        } catch {
+            /* ignore */
+        }
+    }
+    return "openclaw";
+}
+
+function snapshotOpenClaw() {
+    // best-effort: missing CLI / gateway just yields no OpenClaw data (never throws).
+    try {
+        const raw = execFileSync(findOpenclaw(), ["sessions", "--json", "--limit", "all"], {
+            encoding: "utf8",
+            timeout: 60000,
+            stdio: ["ignore", "pipe", "ignore"],
+        });
+        const parsed = JSON.parse(raw);
+        const sessions = Array.isArray(parsed) ? parsed : parsed.sessions || [];
+        const byKey = {};
+        for (const s of sessions) {
+            if (!s || !s.key) continue;
+            byKey[s.key] = {
+                t: (s.inputTokens || 0) + (s.outputTokens || 0),
+                m: `${s.modelProvider || "?"}/${s.model || "?"}`,
+            };
+        }
+        return { at: Date.now(), count: Object.keys(byKey).length, byKey };
+    } catch {
+        return null;
+    }
+}
+
+function openclawDelta(markSnapshot, now) {
+    if (!markSnapshot || !markSnapshot.byKey || !now) return null;
+    const before = markSnapshot.byKey;
+    const models = new Map();
+    let tokens = 0;
+    let sessions = 0;
+    for (const [key, cur] of Object.entries(now.byKey)) {
+        const prev = before[key];
+        const delta = prev ? Math.max(0, cur.t - prev.t) : cur.t;
+        if (delta <= 0) continue;
+        tokens += delta;
+        sessions += 1;
+        const entry = models.get(cur.m) || { model: cur.m, tokens: 0, sessions: 0 };
+        entry.tokens += delta;
+        entry.sessions += 1;
+        models.set(cur.m, entry);
+    }
+    return { tokens, sessions, models: [...models.values()].sort((a, b) => b.tokens - a.tokens) };
+}
+
 function rowTokens(row) {
     if (typeof row.totalTokens === "number") return row.totalTokens;
     const u = row.usage || {};
     return (u.inputTokens || 0) + (u.outputTokens || 0);
 }
 
-function aggregate(rows, startLine, startTs) {
-    const slice = rows.filter((r) => r.__line >= startLine && (!startTs || r.timestamp >= startTs));
+function aggregate(rows, startLine, startTs, markers = []) {
+    const inWindow = rows.filter((r) => r.__line >= startLine && (!startTs || r.timestamp >= startTs));
+    const slice = inWindow.filter((r) => !rowIsBackground(r, markers));
+    const excluded = inWindow.length - slice.length;
     const byModel = new Map();
     let totalTokens = 0;
     for (const r of slice) {
@@ -90,29 +189,38 @@ function aggregate(rows, startLine, startTs) {
         totalTokens,
         first: slice[0]?.timestamp,
         last: slice[slice.length - 1]?.timestamp,
+        excluded,
     };
 }
 
 function resolveWindow(rows, args) {
-    if (args.includes("--all")) return { startLine: 0, startTs: 0, label: "全部" };
+    if (args.includes("--all")) return { startLine: 0, startTs: 0, label: "全部", mark: null };
     const i = args.indexOf("--since");
     if (i !== -1) {
         const raw = args[i + 1];
         const ts = /^\d+$/.test(raw) ? Number(raw) : Date.parse(raw);
         if (!Number.isFinite(ts)) throw new Error(`bad --since value: ${raw}`);
-        return { startLine: 0, startTs: ts, label: `自 ${fmtTs(ts)}` };
+        return { startLine: 0, startTs: ts, label: `自 ${fmtTs(ts)}`, mark: null };
     }
     const marks = readMarks();
     const last = marks[marks.length - 1];
-    if (!last) return { startLine: 0, startTs: 0, label: "全部（无 mark）" };
-    return { startLine: last.lines, startTs: 0, label: `自 mark「${last.label}」` };
+    if (!last) return { startLine: 0, startTs: 0, label: "全部（无 mark）", mark: null };
+    return { startLine: last.lines, startTs: 0, label: `自 mark「${last.label}」`, mark: last };
 }
 
 function textReport(result, windowLabel) {
     const lines = [];
+    const oc = result.openclaw;
     lines.push(`窗口: ${windowLabel}`);
     lines.push(`区间: ${fmtTs(result.first)} → ${fmtTs(result.last)}`);
-    lines.push(`调用: ${result.calls} 次   合计: ${fmtNum(result.totalTokens)} tokens`);
+    if (oc && oc.tokens > 0) {
+        lines.push(`编排/编码 (OpenClaw): ${fmtNum(oc.tokens)} tokens / ${oc.sessions} 会话`);
+        for (const m of oc.models) lines.push(`  ${m.model.padEnd(28)}${fmtNum(m.tokens).padStart(12)}`);
+    } else {
+        lines.push("编排/编码 (OpenClaw): 无数据（缺少 mark 快照，或窗口内无变更）");
+    }
+    lines.push(`codex CLI: ${result.calls} 次   合计: ${fmtNum(result.totalTokens)} tokens`);
+    if (result.excluded) lines.push(`已剔除后台调用: ${result.excluded} 条`);
     lines.push("");
     const wModel = Math.max(8, ...result.models.map((m) => m.model.length));
     lines.push(`${"模型".padEnd(wModel)}${"占比".padStart(7)}${"tokens".padStart(12)}${"调用".padStart(6)}`);
@@ -124,14 +232,19 @@ function textReport(result, windowLabel) {
 }
 
 function cardBlock(result, windowLabel) {
+    const oc = result.openclaw;
     const lines = ["**模型消耗**" + (windowLabel ? `（${windowLabel}）` : "")];
+    if (oc && oc.tokens > 0) {
+        for (const m of oc.models) lines.push(`· 编排/编码 · ${m.model} — ${fmtTok(m.tokens)} tok · ${m.sessions} 会话`);
+    }
     for (const m of result.models) {
         const fail = m.fail ? `，${m.fail} 失败` : "";
-        lines.push(`- ${m.model} — **${(m.share * 100).toFixed(0)}%** · ${fmtTok(m.tokens)} tok · ${m.calls} 次${fail}`);
+        lines.push(`· codex CLI · ${m.model} — **${(m.share * 100).toFixed(0)}%** · ${fmtTok(m.tokens)} tok · ${m.calls} 次${fail}`);
     }
-    lines.push(`- 合计 **${fmtTok(result.totalTokens)} tokens / ${result.calls} 次调用**`);
+    const ocTok = oc && oc.tokens ? oc.tokens : 0;
+    lines.push(`· 合计 **${fmtTok(ocTok + result.totalTokens)} tok**${result.excluded ? `（已剔除 ${result.excluded} 条后台调用）` : ""}`);
     lines.push("");
-    lines.push("_口径：ocx 账本（Codex CLI 侧），不含编排模型调用_");
+    lines.push("_口径：OpenClaw 编排/编码（会话快照差）+ 真实 codex CLI 工作流量；不含补锚探针、定时摘要等后台任务_");
     return lines.join("\n");
 }
 
@@ -142,11 +255,16 @@ try {
     if (cmd === "mark") {
         const label = args.find((a) => !a.startsWith("-")) || `mark-${new Date().toISOString().slice(0, 16)}`;
         fs.mkdirSync(path.dirname(MARKS), { recursive: true });
-        fs.appendFileSync(MARKS, JSON.stringify({ label, ts: Date.now(), lines: rows.length }) + "\n");
-        console.log(`marked「${label}」at ledger line ${rows.length}`);
+        const snapshot = snapshotOpenClaw();
+        const record = { label, ts: Date.now(), lines: rows.length };
+        if (snapshot) record.openclaw = snapshot;
+        fs.appendFileSync(MARKS, JSON.stringify(record) + "\n");
+        console.log(`marked「${label}」at ledger line ${rows.length}${snapshot ? ` · openclaw ${snapshot.count} sessions` : " · openclaw unavailable"}`);
     } else if (cmd === "report" || cmd === "card") {
         const win = resolveWindow(rows, args);
-        const result = aggregate(rows, win.startLine, win.startTs);
+        const markers = readBackground();
+        const result = aggregate(rows, win.startLine, win.startTs, markers);
+        result.openclaw = win.mark ? openclawDelta(win.mark.openclaw, snapshotOpenClaw()) : null;
         if (args.includes("--json")) console.log(JSON.stringify({ window: win.label, ...result }, null, 2));
         else if (cmd === "card") console.log(cardBlock(result, win.label));
         else console.log(textReport(result, win.label));

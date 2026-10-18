@@ -17,7 +17,7 @@
 // 到期提醒 : 监控每轮读 reset-credits，最近一张卡 ≤7 天到期且未提醒过 → 单独推一条（按 expires_at 去重）。
 // 调度     : monitor 24/7 每 10 分钟（整点对齐 :00/:10/…/:50，含 09:00 一跳）；不区分工作日与时段（2026-10-12 定案）。
 
-import { readdirSync, statSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readdirSync, statSync, readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -129,8 +129,18 @@ function readSnapshot() {
 }
 
 // ---------- probe ----------
+// 探针是后台调用（不是部署工作流量）：发请求前打标记，供 codex-usage-stat 统计时剔除。
+const PROBE_MODEL = "openai/gpt-6.1-sol";
+const BACKGROUND_CALLS = process.env.OCX_USAGE_BACKGROUND || join(homedir(), ".opencodex", "background-calls.jsonl");
+function markBackgroundCall(model, caller) {
+  try {
+    mkdirSync(dirname(BACKGROUND_CALLS), { recursive: true });
+    appendFileSync(BACKGROUND_CALLS, JSON.stringify({ model, caller, ts: Date.now() }) + "\n");
+  } catch { /* marker is best-effort; never break the probe */ }
+}
 function probeOnce() {
-  const r = spawnSync("codex", ["exec", "--skip-git-repo-check", "-s", "read-only", "-m", "openai/gpt-6.1-sol", "Reply with exactly: OK"], { timeout: 180000, encoding: "utf8" });
+  markBackgroundCall(PROBE_MODEL, "codex-anchor");
+  const r = spawnSync("codex", ["exec", "--skip-git-repo-check", "-s", "read-only", "-m", PROBE_MODEL, "Reply with exactly: OK"], { timeout: 180000, encoding: "utf8" });
   return !r.error && (r.status === 0 || r.stdout);
 }
 async function probeWithRetry() {
@@ -641,6 +651,7 @@ function windowTest() {
 // ---------- main ----------
 try {
   if (process.env.WINDOW_TEST === "1") windowTest();
+  else if (process.env.PROBE_TEST === "1") console.log("probe:", probeOnce(), "marker:", BACKGROUND_CALLS);
   else if (process.env.CREDIT_TEST === "1") await creditTest();
   else if (process.env.CARD_TEST === "1") await cardTest();
   else if (process.env.BURN_TEST === "1") await burnedTest();
