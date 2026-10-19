@@ -3,14 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "飞书妙记生成 → 自动拉取 AI 产物 → 推送会议纪要群（零 LLM，纯 HTTP）",
-  "main": "watch.mjs",
+  "description": "飞书妙记 / 本地录音 → 会议纪要 → 推群 + 归档（群里丢文件/链接即触发）",
+  "main": "minutes.mjs",
   "scripts": {
-    "start": "node watch.mjs",
-    "auth": "node auth.mjs login",
-    "subscribe": "node subscribe.mjs",
-    "manual": "node manual.mjs",
-    "selftest": "node selftest.mjs"
+    "minutes": "node minutes.mjs",
+    "render": "node render-minutes.mjs",
+    "archive": "node archive.mjs",
+    "probe": "node probe.mjs",
+    "auth": "node auth.mjs login"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.49.0"
