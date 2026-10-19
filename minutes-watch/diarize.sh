@@ -51,7 +51,6 @@ if [ "$MODE" = artifacts ]; then
 fi
 
 T="${DIR}/${BASE}.transcript.json"
-for p in "${PASS[@]}"; do [ "$p" = "--transcript" ] && T="next"; done
 ARGS=("$SRC" --json "$DIR/${BASE}.diar.json" --out-txt "$DIR/${BASE}.speakers.txt")
 [ -f "$T" ] && ARGS+=(--transcript "$T")
 "$PY" diarize.py "${ARGS[@]}" "${PASS[@]}" | tee "$DIR/${BASE}.diar.log"
