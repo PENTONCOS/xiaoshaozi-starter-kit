@@ -30,14 +30,14 @@ SEG = os.path.expanduser("~/.cache/diar/sherpa-onnx-pyannote-segmentation-3-0/mo
 EMB = os.path.expanduser("~/.cache/diar/campplus.onnx")
 
 
-def build(threshold=0.5, num_threads=2):
+def build(threshold=0.5, num_threads=2, num_clusters=-1):
     cfg = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=SEG),
             num_threads=num_threads,
         ),
         embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=EMB, num_threads=num_threads),
-        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=threshold),
+        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=num_clusters, threshold=threshold),
         min_duration_on=0.3,
         min_duration_off=0.5,
     )
@@ -52,13 +52,14 @@ def main():
     ap.add_argument("--json")
     ap.add_argument("--transcript")
     ap.add_argument("--threshold", type=float, default=0.5)
+    ap.add_argument("--num-clusters", type=int, default=-1, help="固定说话人数；-1 则按 threshold 自动聚类")
     a = ap.parse_args()
 
     samples = read_wav16k(a.wav)
     dur = len(samples) / 16000
-    print(f"audio {dur:.1f}s  threshold={a.threshold}", flush=True)
+    print(f"audio {dur:.1f}s  threshold={a.threshold}  num_clusters={a.num_clusters}", flush=True)
 
-    sd = build(a.threshold)
+    sd = build(a.threshold, num_clusters=a.num_clusters)
     print("processing...", flush=True)
     result = sd.process(samples).sort_by_start_time()
 
@@ -71,7 +72,7 @@ def main():
 
     if a.json:
         with open(a.json, "w", encoding="utf-8") as f:
-            json.dump({"threshold": a.threshold, "duration": dur, "speakers": spk, "segments": segs}, f, ensure_ascii=False, indent=2)
+            json.dump({"threshold": a.threshold, "numClusters": a.num_clusters, "duration": dur, "speakers": spk, "segments": segs}, f, ensure_ascii=False, indent=2)
         print("json:", a.json, flush=True)
 
     if not a.transcript:
@@ -94,7 +95,7 @@ def main():
         out.append(it)
 
     t["segments"] = out
-    t["diarization"] = {"speakers": spk, "segments": segs, "threshold": a.threshold}
+    t["diarization"] = {"speakers": spk, "segments": segs, "threshold": a.threshold, "numClusters": a.num_clusters}
     if a.json:
         with open(a.json.replace(".json", ".aligned.json"), "w", encoding="utf-8") as f:
             json.dump(t, f, ensure_ascii=False, indent=2)
