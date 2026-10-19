@@ -1,0 +1,18 @@
+{
+  "name": "minutes-watch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "飞书妙记生成 → 自动拉取 AI 产物 → 推送会议纪要群（零 LLM，纯 HTTP）",
+  "main": "watch.mjs",
+  "scripts": {
+    "start": "node watch.mjs",
+    "auth": "node auth.mjs login",
+    "subscribe": "node subscribe.mjs",
+    "manual": "node manual.mjs",
+    "selftest": "node selftest.mjs"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.49.0"
+  }
+}
