@@ -2,6 +2,22 @@
 
 飞书妙记 / 本地录音 → 会议纪要 → 推群 + 归档。
 
+## 默认行为（2026-10-19 定案，仅限「会议纪要」群）
+
+**群里丢一个音频文件、或一条妙记链接 = 直接做会议纪要分析，不用再说一遍。**
+
+流程固定三步：
+
+1. `node minutes.mjs <妙记链接|音频路径>` —— 机械步骤：拿逐字稿 + 说话人分离，产物落进工作目录
+2. 我读 `*.speakers.txt`，把内容结构化写成 `*.data.json`
+3. `node render-minutes.mjs <base>.data.json --send <chat_id>` —— 渲染卡片 → 推群 → 自动归档
+
+两条输入路线：
+- **音频**：本地 faster-whisper 转写（需后台跑，约 1.5× 实时）→ 声纹聚类分离说话人
+- **妙记链接**：直接读妙记 AI 产物（标题/摘要/逐字稿）→ 用妙记自带 Speaker 标签分离
+
+**妙记事件订阅（一生成就自动进群）已搁置**——写事件订阅要独立应用、走长连接，麻烦，暂不做。保持手动贴链接/拖音频触发。
+
 ## 归档策略（2026-10-19 定案）
 
 **只放本地，不上飞书云文档。** 后续如有额外需求再改（云端需要 `docx:document` + `drive:drive`，当前 bot 无文档类权限）。
@@ -51,6 +67,9 @@ python diarize.py --from-artifacts <base>.artifacts.json --out-txt <base>.speake
 ## 命令
 
 ```bash
+# 第一步：拿逐字稿 + 说话人分离（音频或妙记链接，自动识别）
+node minutes.mjs <audio|妙记链接> [--slug <名>] [--dir <目录>] [--speakers N]
+
 # 渲染 + 推送 + 自动归档
 node render-minutes.mjs <data.json> --send <chat_id>
 
