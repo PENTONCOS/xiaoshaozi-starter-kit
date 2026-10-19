@@ -27,7 +27,7 @@ def read_wav16k(path):
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 SEG = os.path.expanduser("~/.cache/diar/sherpa-onnx-pyannote-segmentation-3-0/model.onnx")
-EMB = os.path.expanduser("~/.cache/diar/3dspeaker.onnx")
+EMB = os.path.expanduser("~/.cache/diar/campplus.onnx")
 
 
 def build(threshold=0.5, num_threads=2):
