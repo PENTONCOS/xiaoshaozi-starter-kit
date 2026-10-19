@@ -21,6 +21,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -178,9 +179,46 @@ def auto_k(E, dur, kmin=2, kmax=8, min_share=MIN_SHARE):
     return best[0], best[2], detail
 
 
+def from_artifacts(a):
+    """妙记 artifacts.json 自带 Speaker 标签，直接提取，不需要音频。"""
+    with open(a.from_artifacts, encoding="utf-8") as f:
+        j = json.load(f)
+    txt = j.get("transcript") or ""
+    blocks = re.split(r"\n(?=Speaker\s+\d+\s+\d)", txt)
+    lines = []
+    for b in blocks:
+        m = re.match(r"Speaker\s+(\d+)\s+(\d{2}):(\d{2}):(\d{2})", b)
+        if not m:
+            continue
+        body = " ".join(b.split("\n", 1)[1].split()) if "\n" in b else ""
+        if not body:
+            continue
+        sec = int(m.group(2)) * 3600 + int(m.group(3)) * 60 + int(m.group(4))
+        lines.append({"speaker": f"S{int(m.group(1)) - 1}", "start": sec, "text": body})
+    # 重排：说话最多的是 S0
+    tot = {}
+    for l in lines:
+        tot[l["speaker"]] = tot.get(l["speaker"], 0) + len(l["text"])
+    remap = {o: f"S{i}" for i, (o, _) in enumerate(sorted(tot.items(), key=lambda kv: -kv[1]))}
+    for l in lines:
+        l["speaker"] = remap[l["speaker"]]
+    spk = sorted({l["speaker"] for l in lines})
+    print(f"妙记 Speaker 标签: {len(lines)} 段, {len(spk)} 人", flush=True)
+    if a.out_txt:
+        with open(a.out_txt, "w", encoding="utf-8") as f:
+            f.write(f"# 说话人分离逐字稿（妙记自带标签）  {len(spk)} 人\n\n")
+            for l in lines:
+                mm, ss = divmod(int(l["start"]), 60)
+                f.write(f"[{mm:02d}:{ss:02d}] {l['speaker']}: {l['text']}\n")
+        print("out-txt:", a.out_txt, flush=True)
+    for l in lines:
+        print(f"[{l['start']:7.2f}] {l['speaker']}: {l['text'][:80]}")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("audio")
+    ap.add_argument("audio", nargs="?")
+    ap.add_argument("--from-artifacts", help="妙记 artifacts.json：用其自带 Speaker 标签，不需要音频")
     ap.add_argument("--transcript", help="逐字稿 json，写回 speaker 字段")
     ap.add_argument("--json", help="diarization 结果 json")
     ap.add_argument("--out-txt", help="带说话人的可读逐字稿")
@@ -189,6 +227,12 @@ def main():
     ap.add_argument("--min-share", type=float, default=MIN_SHARE)
     ap.add_argument("--threads", type=int, default=2)
     a = ap.parse_args()
+
+    if a.from_artifacts:
+        from_artifacts(a)
+        return
+    if not a.audio:
+        ap.error("需要 AUDIO，或用 --from-artifacts")
 
     wav = ensure_wav16k(a.audio)
     samples = read_wav16k(wav)
@@ -245,7 +289,6 @@ def main():
         with open(a.json, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
         print("json:", a.json, flush=True)
-
     if not a.transcript:
         for x in labeled:
             print(f"[{x['start']:7.2f} -> {x['end']:7.2f}] {x['speaker']}")
@@ -267,7 +310,8 @@ def main():
                         "silhouette": sc, "segments": labeled}
 
     if a.json:
-        with open(a.json.replace(".json", ".aligned.json"), "w", encoding="utf-8") as f:
+        base = a.transcript[:-5] if a.transcript.endswith(".json") else a.transcript
+        with open(base + ".aligned.json", "w", encoding="utf-8") as f:
             json.dump(t, f, ensure_ascii=False, indent=2)
 
     # 合并连续同一说话人，便于阅读

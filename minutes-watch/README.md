@@ -16,10 +16,37 @@
 | `*.data.json` | 结构化数据源，渲染的输入 |
 | `*.data.card.json` | 群里那张飞书卡片的快照 |
 | `*.transcript.txt` / `.json` | 逐字稿（纯文本 / 带时间戳） |
+| `*.speakers.txt` | 说话人分离逐字稿（`[mm:ss] S0: …`） |
+| `*.transcript.aligned.json` | 逐字稿 + 每段 speaker |
+| `*.diar.json` | 说话人分离原始结果（分段 + 声纹聚类） |
 | `*.artifacts.json` | 妙记原始 AI 产物 |
 | `meta.json` | 日期、标题、归档时间、文件清单 |
 
 索引：`archive/INDEX.md`，按日期倒序，含可点击的纪要链接。
+
+## 说话人分离（diarization）
+
+本地运行，纯 CPU、离线、不需要 HF token：sherpa-onnx + pyannote 分段 + 3D-Speaker campplus 声纹。模型在 `~/.cache/diar/`（约 34MB），venv 在 `~/.local/venvs/diar/`。
+
+```bash
+# 本地录音（任意格式，内部用 afconvert 转 16k mono）
+python diarize.py <audio> \
+  --transcript <base>.transcript.json \
+  --json <base>.diar.json \
+  --out-txt <base>.speakers.txt \
+  [--speakers N]          # 不填=自动定人数
+
+# 只有妙记、没有音频：直接用妙记自带的 Speaker 标签
+python diarize.py --from-artifacts <base>.artifacts.json --out-txt <base>.speakers.txt
+```
+
+判定人数的方式：球面 k-means 扫 `k=2..8`，先按「最小说话人占比」(默认 15%) 过滤过切解，再取 silhouette 最优。
+
+注意：
+- 自动定人数对会议录音够用，但不保证；不满意就 `--speakers N`，最稳
+- 只能给 `S0/S1/S2`，认不出真名（要认名字还得单独做声纹注册）
+- 抢话、重叠语音会判给主导那一方
+- 妙记路线不需要音频，但它自己的标签也会过切（阿里云那场 59 分钟标了 7 人）
 
 ## 命令
 

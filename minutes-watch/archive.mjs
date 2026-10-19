@@ -19,6 +19,9 @@ const KEEP = [
   '.artifacts.json', // 妙记原始 AI 产物
   '.transcript.txt',
   '.transcript.json',
+  '.transcript.aligned.json', // 逐字稿 + 每段说话人
+  '.speakers.txt',   // 说话人分离逐字稿
+  '.diar.json',      // 说话人分离原始结果
 ];
 
 function listMeetings() {
