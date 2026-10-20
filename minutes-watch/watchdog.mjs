@@ -36,7 +36,7 @@ const TIMEOUT_MIN = Number(arg('timeout-min', '120'));
 const STALL_MIN = Number(arg('stall-min', '15'));
 const TITLE = arg('title', '后台任务');
 const DONE_MARKER = arg('done-marker', '=== 完成 ===');
-const NOTIFY_DONE = has('notify-done');
+const NOTIFY_DONE = !has('quiet-done');   // 2026-10-20: 成功也发卡片，默认开，--quiet-done 关闭
 
 function target() {
   const c = arg('chat');
@@ -147,7 +147,7 @@ if (mode === 'run') {
     const mins = Math.round((Date.now() - t0) / 60000);
     if (code === 0) {
       if (NOTIFY_DONE) {
-        try { await send(`任务完成，耗时 ${mins} 分钟。\n日志: ${esc(LOG)}`, 'green', TITLE + ' 完成'); } catch (e) { console.error(e.message); }
+        try { await send(`**完成**\n任务: ${esc(TITLE)}\n耗时: ${mins} 分钟\n日志: ${esc(LOG)}\n\n**最后 10 行**\n${esc(tailLines(LOG, 10))}`, 'green', TITLE + ' 完成'); } catch (e) { console.error(e.message); }
       }
       process.exit(0);
     }
