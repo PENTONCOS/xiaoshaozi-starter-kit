@@ -33,6 +33,7 @@ if (!input) {
   process.exit(1);
 }
 
+const VOICE_PY = path.join(HOME, '.local/venvs/diar/bin/python');
 const t0 = Date.now();
 const stage = (s) => log(`[${((Date.now() - t0) / 1000).toFixed(1)}s] ${s}`);
 
@@ -48,6 +49,34 @@ stage(`产物就绪: ${dir}/${base}（${digest.segments} 段 / ${digest.speakers
 
 // ---------------------------------------------------------------- 2. LLM 结构化
 const { segments, from } = readSegments(dir, base);
+
+// 声纹识别：音频路线才有 diar.json，用声纹库把 S0/S1 换成真名
+let speakersNamed = [];
+if (digest.mode === 'audio') {
+  try {
+    const diarPath = path.join(dir, `${base}.diar.json`);
+    if (fs.existsSync(diarPath)) {
+      const out = execFileSync(VOICE_PY, [path.join(ROOT, 'voiceprint.py'), 'identify', input, '--diar', diarPath], { encoding: 'utf8' });
+      const map = JSON.parse(out.slice(out.indexOf('{'), out.lastIndexOf('}') + 1));
+      const nameOf = {};
+      for (const [label, info] of Object.entries(map)) {
+        if (info.name) nameOf[label] = info.name;
+        stage(`  声纹 ${label} → ${info.name || '未识别'}（${info.score ?? '-'}）`);
+      }
+      for (const s of segments) if (nameOf[s.speaker]) s.speaker = nameOf[s.speaker];
+      speakersNamed = Object.values(nameOf);
+      if (Object.keys(nameOf).length) {
+        fs.writeFileSync(path.join(dir, `${base}.speakers.named.txt`),
+          `# 声纹识别后逐字稿\n\n` + segments.map((s) => {
+            const m = Math.floor(s.start / 60), sec = Math.round(s.start % 60);
+            return `[${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}] ${s.speaker}: ${s.text}`;
+          }).join('\n') + '\n', 'utf8');
+      }
+    }
+  } catch (e) {
+    stage(`  声纹识别跳过：${e.message.slice(0, 120)}`);
+  }
+}
 stage(`第二步：结构化 ${segments.length} 段（来源 ${from}，模型 ${model || '默认'}）`);
 const data = await structureMinutes({
   segments,
@@ -60,6 +89,7 @@ const data = await structureMinutes({
     transcriptPath: `${base}.transcript.txt`,
     artifactsPath: digest.mode === 'link' ? `${base}.artifacts.json` : '',
     model,
+    attendees: speakersNamed,
   },
   onProgress: (m) => stage(m),
 });
