@@ -14,7 +14,7 @@
                    [--out-txt LABELED.txt] [--speakers N] [--max-k 8] [--min-share 0.15]
 
 说明:
-  - 不给 --speakers 时自动定人数
+  - 不给 --speakers 时自动定人数：从人数最少的解开始试，宁可少不可多
   - 自动结果不满意时用 --speakers 明确指定，最稳
   - 有 --transcript 时把 speaker 写回逐字稿 json，并生成可读的 [S0] 文本
 """
@@ -37,6 +37,7 @@ EMB = os.path.join(MODEL_DIR, "campplus.onnx")
 PRESPLIT_CLUSTERS = 16  # 过度切分只为拿语音段边界，此处标签无意义
 MIN_EMB_SEC = 0.4       # 短于此的片段不做声纹，最后按时间就近归并
 MIN_SHARE = 0.15        # 最小说话人占比，低于此的 k 判为过切
+K_DELTA = 0.02          # 从人数最少开始试时，silhouette 允许比最优值低多少
 
 
 def ensure_wav16k(path):
@@ -159,12 +160,21 @@ def silhouette(D, labels):
     return float(np.mean(out)) if out else -1.0
 
 
-def auto_k(E, dur, kmin=2, kmax=8, min_share=MIN_SHARE):
-    """扫 k，过滤掉过切解，取 silhouette 最优。返回 (k, labels, detail)。"""
+def auto_k(E, dur, kmin=2, kmax=8, min_share=MIN_SHARE, k_delta=K_DELTA):
+    """从人数最少开始试：k 递增 → 取第一个「足够好」的解，而不是全局 silhouette 最优。
+
+    判定规则（两步）：
+      1. 硬门槛：每个说话人占比 >= min_share，否则判为过切（把同一个人切成两半）
+      2. 软门槛：该 k 的 silhouette 不低于全体合格解最优值 k_delta 以内
+         满足 → 立刻采用（人数更少，解释力已足够）
+    只有所有 k 都不过硬门槛时，才判为单人。
+    返回 (k, labels, detail, chosen_reason)
+    """
     D = cosine_dist(E)
     total = float(dur.sum())
-    detail, best = [], None
+    detail = []
     kmax = min(kmax, len(E))
+    cands = []
     for k in range(kmin, kmax + 1):
         lab = spherical_kmeans(E, k)
         shares = [float(dur[lab == c].sum() / total) for c in range(k)]
@@ -172,11 +182,20 @@ def auto_k(E, dur, kmin=2, kmax=8, min_share=MIN_SHARE):
         valid = min(shares) >= min_share
         detail.append({"k": k, "silhouette": round(sil, 4),
                        "minShare": round(min(shares), 4), "ok": valid})
-        if valid and (best is None or sil > best[1]):
-            best = (k, sil, lab)
-    if best is None:  # 没有合格的多说话人解 -> 判为单人
-        return 1, np.zeros(len(E), dtype=int), detail
-    return best[0], best[2], detail
+        if valid:
+            cands.append((k, sil, lab))
+
+    if not cands:  # 没有合格的多说话人解 -> 判为单人
+        return 1, np.zeros(len(E), dtype=int), detail, "no valid k -> single speaker"
+
+    best_sil = max(c[1] for c in cands)
+    floor = best_sil - k_delta
+    for k, sil, lab in cands:          # cands 已按 k 升序
+        if sil >= floor:
+            reason = f"fewest-first: k={k} sil={sil:+.3f} >= floor {floor:+.3f} (best {best_sil:+.3f})"
+            return k, lab, detail, reason
+    k, sil, lab = cands[-1]
+    return k, lab, detail, f"fallback: largest k={k} sil={sil:+.3f}"
 
 
 def from_artifacts(a):
@@ -225,6 +244,7 @@ def main():
     ap.add_argument("--speakers", type=int, default=-1, help="人数；-1=自动")
     ap.add_argument("--max-k", type=int, default=8)
     ap.add_argument("--min-share", type=float, default=MIN_SHARE)
+    ap.add_argument("--k-delta", type=float, default=K_DELTA, help="从少到多试人数时 silhouette 允许的让步幅度")
     ap.add_argument("--threads", type=int, default=2)
     a = ap.parse_args()
 
@@ -258,7 +278,8 @@ def main():
         detail = [{"k": k, "silhouette": round(silhouette(cosine_dist(E), lab), 4),
                    "minShare": round(float(min(np.bincount(lab, weights=dur) / dur.sum())), 4), "ok": True}]
     else:
-        k, lab, detail = auto_k(E, dur, kmax=a.max_k, min_share=a.min_share)
+        k, lab, detail, reason = auto_k(E, dur, kmax=a.max_k, min_share=a.min_share, k_delta=a.k_delta)
+        print(f"  chosen: {reason}", flush=True)
     sc = next((d["silhouette"] for d in detail if d["k"] == k), None)
     print(f"speakers {k}  silhouette={sc}  auto={'yes' if a.speakers <= 0 else 'no'}", flush=True)
     for d in detail:

@@ -49,10 +49,25 @@ if (argv[0] === 'link' || argv[0] === 'audio') {
   mode = /^https?:\/\//.test(input || '') || /^[A-Za-z0-9]{20,32}$/.test(input || '') ? 'link' : 'audio';
 }
 if (!input) {
-  console.error('缺少输入：妙记链接或音频路径');
+  console.error('缺少输入：妙记链接、音频路径，或已转录的 .txt/.json 产物');
   process.exit(1);
 }
 input = input.replace(/^~/, HOME);
+
+// 显式识别已转录产物，避免被误送进 ASR（曾因此产出空壳纪要）
+const AUDIO_EXT = /\.(m4a|mp3|wav|aac|flac|ogg|mp4|mov|mkv|webm)$/i;
+const TEXT_EXT = /\.(txt|json)$/i;
+if (mode === 'audio' && TEXT_EXT.test(input)) {
+  mode = 'transcript';
+  if (!fs.existsSync(input)) {
+    console.error(`逐字稿不存在: ${input}`);
+    process.exit(1);
+  }
+} else if (mode === 'audio' && !AUDIO_EXT.test(input)) {
+  console.error(`无法识别的输入类型: ${input}`);
+  console.error(`支持：妙记链接 / 音频(${AUDIO_EXT.source}) / 逐字稿(.txt|.json)`);
+  process.exit(1);
+}
 
 const today = new Date();
 const ymd = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
@@ -133,6 +148,92 @@ async function fromLink(url) {
   };
 }
 
+// --------------------------------------------- 已有逐字稿的两种格式解析
+/** 格式A：[mm:ss] S0: 正文（diarize.sh 输出） */
+function parseInlineTxt(txt) {
+  const out = [];
+  for (const line of txt.split('\n')) {
+    const m = line.match(/^\[(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\]\s*([^:：]{1,24})[:：]\s*(.*)$/);
+    if (!m) continue;
+    const start = (m[1] ? +m[1] * 3600 : 0) + +m[2] * 60 + +m[3];
+    if (m[5].trim()) out.push({ start, speaker: m[4].trim(), text: m[5].trim() });
+  }
+  return out;
+}
+
+/** 格式B：妙记原生 transcript（Speaker 1 00:00:00.200 块 + 紧随正文行） */
+function parseMinutesTxt(txt) {
+  const out = [];
+  for (const block of txt.split(/\n(?=Speaker\s+\d+\s+\d)/)) {
+    const m = block.match(/^Speaker\s+(\d+)\s+(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?\s*\n([\s\S]*)$/);
+    if (!m) continue;
+    const body = m[5].split('\n').join(' ').replace(/\s+/g, ' ').trim();
+    if (!body) continue;
+    out.push({ start: +m[2] * 3600 + +m[3] * 60 + +m[4], speaker: `S${m[1]}`, text: body });
+  }
+  return out;
+}
+
+function fmtLines(segs) {
+  return segs
+    .map((s) => {
+      const m = Math.floor(s.start / 60), sec = Math.round(s.start % 60);
+      return `[${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}] ${s.speaker}: ${s.text}`;
+    })
+    .join('\n');
+}
+
+// ------------------------------------------------------- 已转录产物
+function fromTranscript(file) {
+  const base = `${ymd}-${slugOpt || slugify(path.basename(file))}`;
+  const dir = dirOpt ? dirOpt.replace(/^~/, HOME) : OUT_ROOT;
+  fs.mkdirSync(dir, { recursive: true });
+
+  const isJson = /\.json$/i.test(file);
+  let segs = [];
+  let rawTxt = '';
+  if (isJson) {
+    const j = readJson(file, {});
+    segs = (j.segments || []).map((s) => ({
+      start: s.start || 0,
+      speaker: s.speaker || s.speaker_zh || 'S?',
+      text: s.text || '',
+    })).filter((s) => s.text);
+    fs.copyFileSync(file, path.join(dir, `${base}.transcript.json`));
+  } else {
+    rawTxt = fs.readFileSync(file, 'utf8');
+    segs = parseInlineTxt(rawTxt);
+    if (!segs.length) segs = parseMinutesTxt(rawTxt);
+  }
+
+  if (!segs.length) {
+    console.error(`没能从 ${path.basename(file)} 解析出任何发言段落。`);
+    console.error('支持格式：[mm:ss] S0: 正文，或妙记原生 “Speaker 1 00:00:05” 块。');
+    process.exit(1);
+  }
+
+  const txt = fmtLines(segs);
+  if (!isJson) fs.writeFileSync(path.join(dir, `${base}.transcript.txt`), txt, 'utf8');
+  fs.writeFileSync(
+    path.join(dir, `${base}.speakers.txt`),
+    `# 说话人分离逐字稿（来自 ${path.basename(file)}）\n\n${txt}\n`,
+    'utf8'
+  );
+
+  const spk = new Set(segs.map((s) => s.speaker));
+  return {
+    mode: 'transcript', base, dir,
+    duration: segs.length ? segs[segs.length - 1].start : null,
+    segments: segs.length,
+    speakers: spk.size,
+    files: {
+      transcript_txt: `${base}.transcript.txt`,
+      speakers_txt: `${base}.speakers.txt`,
+      data_json: `${base}.data.json（待生成）`,
+    },
+  };
+}
+
 // ------------------------------------------------------------------ 音频
 function fromAudio(file) {
   if (!fs.existsSync(file)) throw new Error(`音频不存在: ${file}`);
@@ -166,7 +267,10 @@ function fromAudio(file) {
   };
 }
 
-const out = mode === 'link' ? await fromLink(input) : fromAudio(input);
+const out =
+  mode === 'link' ? await fromLink(input)
+  : mode === 'transcript' ? fromTranscript(input)
+  : fromAudio(input);
 console.log('\n===== minutes.mjs digest =====');
 console.log(JSON.stringify(out, null, 2));
 console.log(`\n下一步: 读 ${out.dir}/${out.base}.speakers.txt 写 ${out.base}.data.json，`);
