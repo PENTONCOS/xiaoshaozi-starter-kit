@@ -51,9 +51,29 @@ def ensure_wav16k(path):
     out = os.path.join(tempfile.gettempdir(), f"diar-{os.getpid()}-{abs(hash(path)) % 10**8}.wav")
     r = subprocess.run(["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", path, out],
                        capture_output=True, text=True)
-    if r.returncode != 0:
-        sys.exit(f"afconvert 失败: {r.stderr.strip() or r.stdout.strip()}")
-    return out
+    if r.returncode == 0 and os.path.exists(out):
+        return out
+    # afconvert 对某些 AAC 封装会报 'pck?'，退回 PyAV 解码
+    msg = (r.stderr.strip() or r.stdout.strip())
+    print(f"afconvert 不可用（{msg}），改用 PyAV 解码", flush=True)
+    try:
+        import av
+        import wave as _wave
+        c = av.open(path)
+        st = c.streams.audio[0]
+        res = av.AudioResampler(format="s16", layout="mono", rate=16000)
+        frames = []
+        for fr in c.decode(st):
+            for rf in res.resample(fr):
+                frames.append(rf.to_ndarray().tobytes())
+        if not frames:
+            sys.exit("PyAV 解码得到 0 帧，音频可能损坏")
+        with _wave.open(out, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+            w.writeframes(b"".join(frames))
+        return out
+    except Exception as e:
+        sys.exit(f"音频转 wav 全部失败: afconvert={msg}; pyav={e}")
 
 
 def read_wav16k(path):
