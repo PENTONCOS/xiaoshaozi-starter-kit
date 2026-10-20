@@ -129,7 +129,7 @@ def cmd_enroll(a):
     if a.from_samples:
         src = os.path.join(a.from_samples, f"{a.label}.npy")
         if not os.path.exists(src):
-            src = os.path.join(a.from_samples, "S0.npy")
+            sys.exit(f"找不到 {src}")
         emb = np.load(src)
     else:
         samples = load_wav(a.audio)
@@ -138,20 +138,33 @@ def cmd_enroll(a):
         if len(E) == 0:
             sys.exit("参考音频里没提取到有效声纹（太短或全是静音）")
         emb = E.mean(axis=0)
-        emb = emb / (np.linalg.norm(emb) + 1e-9)
+    emb = emb / (np.linalg.norm(emb) + 1e-9)
 
-    path = os.path.join(VOICE_DIR, f"{a.name}.npy")
+    # 每个来源单独存一个向量，避免跨场互相污染
+    source = a.source or "manual"
+    safe_src = "".join(c if c.isalnum() or c in "-_." else "_" for c in source)[:60]
+    fname = f"{a.name}__{safe_src}.npy"
+    path = os.path.join(VOICE_DIR, fname)
     np.save(path, emb.astype(np.float32))
     os.chmod(path, 0o600)
-    with open(os.path.join(VOICE_DIR, "gallery.json"), "r", encoding="utf8") if os.path.exists(
-            os.path.join(VOICE_DIR, "gallery.json")) else open(os.devnull) as f:
-        pass
+
     gpath = os.path.join(VOICE_DIR, "gallery.json")
     gal = json.load(open(gpath, encoding="utf8")) if os.path.exists(gpath) else {}
-    gal[a.name] = {"file": f"{a.name}.npy", "dim": int(emb.shape[0]), "enrolledAt": __import__("datetime").datetime.now().astimezone().isoformat(timespec="seconds")}
+    ent = gal.get(a.name) or {}
+    vecs = ent.get("vectors")
+    if vecs is None:                      # 兼容旧格式（单个 file）
+        vecs = []
+        if ent.get("file"):
+            vecs.append({"file": ent["file"], "source": "legacy",
+                         "dim": ent.get("dim", int(emb.shape[0])),
+                         "enrolledAt": ent.get("enrolledAt", "")})
+    vecs = [v for v in vecs if v.get("file") != fname]
+    vecs.append({"file": fname, "source": source, "dim": int(emb.shape[0]),
+                 "enrolledAt": __import__("datetime").datetime.now().astimezone().isoformat(timespec="seconds")})
+    gal[a.name] = {"dim": int(emb.shape[0]), "vectors": vecs}
     json.dump(gal, open(gpath, "w", encoding="utf8"), ensure_ascii=False, indent=2)
     os.chmod(gpath, 0o600)
-    print(f"已登记声纹: {a.name} (dim {emb.shape[0]}) -> {path}")
+    print(f"已登记声纹: {a.name} 来源 {source} -> {path}（该人共 {len(vecs)} 个来源向量）")
 
 
 def cmd_identify(a):
@@ -159,7 +172,16 @@ def cmd_identify(a):
     if not os.path.exists(gpath):
         sys.exit(f"声纹库为空：{VOICE_DIR}/gallery.json 不存在，先 enroll")
     gal = json.load(open(gpath, encoding="utf8"))
-    names = {k: np.load(os.path.join(VOICE_DIR, v["file"])) for k, v in gal.items()}
+    names = {}
+    for k, v in gal.items():
+        files = [x["file"] for x in v["vectors"]] if v.get("vectors") else ([v["file"]] if v.get("file") else [])
+        mats = [np.load(os.path.join(VOICE_DIR, f)) for f in files if os.path.exists(os.path.join(VOICE_DIR, f))]
+        if not mats:
+            continue
+        m = np.mean(mats, axis=0)
+        names[k] = m / (np.linalg.norm(m) + 1e-9)
+    if not names:
+        sys.exit("声纹库里没有可用的向量文件")
 
     samples = load_wav(a.audio)
     d = json.load(open(a.diar, encoding="utf8"))
@@ -167,8 +189,23 @@ def cmd_identify(a):
     for s in d.get("segments") or []:
         by.setdefault(s["speaker"], []).append(s)
 
+    # 人工标注的多人群：直接跳过，不输出任何名字（避免混音被误判成其中某人）
+    skip = set(x.strip() for x in (a.skip or "").split(",") if x.strip())
+    mapfile = os.path.join(os.path.dirname(os.path.abspath(a.diar)), "speaker-map.json")
+    if os.path.exists(mapfile) and not a.no_map:
+        try:
+            mm = json.load(open(mapfile, encoding="utf8"))
+            for k, v in (mm.get("labels") or {}).items():
+                if v.get("mixed"):
+                    skip.add(k)
+        except Exception:
+            pass
+
     result = {}
     for spk, ss in sorted(by.items()):
+        if spk in skip:
+            result[spk] = {"name": None, "skipped": "mixed-cluster", "reason": "人工标注为多人混合，跳过声纹匹配"}
+            continue
         E, _ = diar.embed_segments(samples, [{"start": s["start"], "end": s["end"]} for s in ss])
         if len(E) == 0:
             result[spk] = {"name": None, "reason": "no embedding"}
@@ -182,6 +219,9 @@ def cmd_identify(a):
                        "threshold": a.threshold,
                        "all": {k: round(v, 4) for k, v in sorted(scores.items(), key=lambda x: -x[1])}}
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    named = {k: v["name"] for k, v in result.items() if v.get("name")}
+    skipped = [k for k, v in result.items() if v.get("skipped")]
+    print(f"\n[identify] 识别 {len(named)} 人 {named}，跳过 {len(skipped)} 个混合簇 {skipped}", file=sys.stderr)
 
 
 ap = argparse.ArgumentParser()
@@ -194,12 +234,14 @@ p.set_defaults(fn=cmd_build_samples)
 
 p = sub.add_parser("enroll", help="登记某人声纹")
 p.add_argument("name"); p.add_argument("--from-samples"); p.add_argument("--audio")
-p.add_argument("--label", default="S0")
+p.add_argument("--label", default="S0"); p.add_argument("--source", default="", help="来源标注，如会议 slug")
 p.set_defaults(fn=cmd_enroll)
 
 p = sub.add_parser("identify", help="用声纹库标真人名")
 p.add_argument("audio"); p.add_argument("--diar", required=True)
 p.add_argument("--threshold", type=float, default=MATCH_THRESHOLD)
+p.add_argument("--skip", default="", help="跳过的簇标签，逗号分隔，如 S2,S3")
+p.add_argument("--no-map", action="store_true", help="忽略同目录的 speaker-map.json")
 p.set_defaults(fn=cmd_identify)
 
 a = ap.parse_args()
