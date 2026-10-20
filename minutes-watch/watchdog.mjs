@@ -82,6 +82,9 @@ async function send(text, template = 'red', title = TITLE) {
     body: JSON.stringify({ receive_id: t.id, msg_type: 'interactive', content: JSON.stringify(card) }),
   });
   const d = await s.json();
+  const LOGF = path.join(HOME, '.openclaw/logs/watchdog.log');
+  fs.mkdirSync(path.dirname(LOGF), { recursive: true });
+  fs.appendFileSync(LOGF, `${new Date().toISOString()}\t${title}\t${template}\t${t.type}:${t.id}\tcode=${d.code}\tmsg_id=${d.data?.message_id || '-'}\n`);
   if (d.code !== 0) throw new Error(`send 失败 ${d.code} ${d.msg}`);
   return d.data?.message_id;
 }
