@@ -19,7 +19,7 @@ log "=== step 1/3 转录（faster-whisper medium） ==="
 "$ASR_PY" -u "$TRANSCRIBE" "$AUDIO" \
   --out-txt "$DIR/$BASE.transcript.txt" \
   --out-json "$DIR/$BASE.transcript.json" \
-  --model medium --language zh --threads 8
+  --model "$HOME/.cache/asr/fw-medium" --language zh --threads 8
 RC=$?
 log "转录退出码 $RC"
 [ $RC -ne 0 ] && { log "转录失败，终止"; exit $RC; }
