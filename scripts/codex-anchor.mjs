@@ -24,7 +24,7 @@ import { homedir } from "node:os";
 import { getSender } from "/Users/cospeyton/notify/feishu-notify.mjs";
 
 const SESSIONS = join(homedir(), ".codex/sessions");
-const STATE_PATH = join(homedir(), "my-assistant/state/codex-anchor-state.json");
+const STATE_PATH = process.env.ANCHOR_STATE || join(homedir(), "my-assistant/state/codex-anchor-state.json"); // 测试可指向临时文件，避免污染真实状态
 const LOG_TAG = "[codex-anchor]";
 const BURN_WINDOW_MIN = 30;     // 燃烧速率观察窗
 const BURN_JUMP_PP = 15;        // 30min 内涨 15 个百分点 → 燃烧过快
@@ -36,11 +36,18 @@ const AUTO_PROBE_FROM = 9, AUTO_PROBE_TO = 21; // 自动补锚时段（北京时
 const AUTO_PROBE_IDLE_MIN_MS = Number(process.env.AUTO_PROBE_IDLE_MS ?? 0); // 去抖窗（2026-10-14 用户定案改为 0 = 判闲即探；设 >0 可恢复等待）
 const AUTO_PROBE_COOLDOWN_MS = 90 * 60 * 1000; // 两次自动补锚最短间隔
 const AUTO_PROBE_MAX_PER_DAY = 6;              // 每日自动补锚上限（成为主力后放宽；真正的成本闸门是「仅在真空闲时探」）
+// 边界追赶（2026-10-21 用户定案 A）：monitor 每 10 分钟一跳，若重置点落在 tick 之后几秒，
+// 该轮必然读到旧窗口末尾、白等一个整 tick，空档期还会被真实调用抢走。读到「重置距今 ≤3 分钟」
+// 就先等到 reset+15s 再重读，让窗口归零那一刻当轮就被抓到。
+const CATCHUP_MAX_MS = 3 * 60 * 1000;        // 距重置 ≤3 分钟才追赶
+const CATCHUP_PAD_MS = 15 * 1000;            // 等过边界 15s 再读，避开秒级抖动
+const CATCHUP_WAIT_CAP_MS = 4 * 60 * 1000;   // 单次等待上限，绝不越过下一个 10 分钟 tick
 const BEIJING = "Asia/Shanghai";
 
 const mode = process.argv[2] || "";
 const now = () => Date.now();
 const log = (...a) => console.log(new Date().toISOString(), LOG_TAG, ...a);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const fmtT = (ts) => new Date(ts).toLocaleString("zh-CN", { timeZone: BEIJING, hour12: false, hour: "2-digit", minute: "2-digit" });
 const fmtDT = (ts) => new Date(ts).toLocaleString("zh-CN", { timeZone: BEIJING, hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -269,8 +276,8 @@ function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
 }
 
 // ---------- opencodex real quota (zero-LLM API source) ----------
-const OCX_QUOTA_URL = "http://127.0.0.1:10100/api/codex-auth/quota";
-const OCX_REFRESH_URL = "http://127.0.0.1:10100/api/codex-auth/accounts/refresh";
+const OCX_QUOTA_URL = process.env.OCX_QUOTA_URL || "http://127.0.0.1:10100/api/codex-auth/quota";
+const OCX_REFRESH_URL = process.env.OCX_REFRESH_URL || "http://127.0.0.1:10100/api/codex-auth/accounts/refresh";
 const OCX_RESET_CREDITS_URL = "http://127.0.0.1:10100/api/codex-auth/reset-credits?accountId=__main__";
 const OCX_STALE_MS = 5 * 60 * 1000; // 缓存超过 5 分钟就主动刷新（观测性、零额度）——15min 太松，阈值穿越会被漏报（2026-10-13 实测 78% vs 真实 91%）
 const EXPIRY_WARN_DAYS = 7; // 重置卡到期提醒阈值（天）
@@ -288,7 +295,7 @@ function ocxSnap(j) {
   };
   return { rl, ts: now(), updatedAt: q.updatedAt || null, resetCredits: q.resetCredits ?? null, observedAt: q.shortObservedAt ?? null, windowSeconds: q.shortWindowSeconds || 18000 };
 }
-async function fetchOcxQuota(allowRefresh) {
+async function fetchOcxQuota(allowRefresh, forceRefresh = false) {
   const token = ocxToken();
   if (!token) return null;
   const H = { Authorization: "Bearer " + token };
@@ -296,7 +303,7 @@ async function fetchOcxQuota(allowRefresh) {
     const r = await fetch(OCX_QUOTA_URL, { headers: H, signal: AbortSignal.timeout(8000) });
     if (!r.ok) return null;
     let snap = ocxSnap(await r.json());
-    if (snap && allowRefresh && (!snap.updatedAt || now() - snap.updatedAt > OCX_STALE_MS)) {
+    if (snap && allowRefresh && (forceRefresh || !snap.updatedAt || now() - snap.updatedAt > OCX_STALE_MS)) {
       try {
         await fetch(OCX_REFRESH_URL, { method: "POST", headers: H, signal: AbortSignal.timeout(20000) });
         const r2 = await fetch(OCX_QUOTA_URL, { headers: H, signal: AbortSignal.timeout(8000) });
@@ -369,6 +376,46 @@ function windowIdle(snap) {
 }
 // 自动补锚：09:00–21:00 且窗口空闲时就探一次（探完锚点落下，条件自失效，天然不循环）
 // 去抖窗 AUTO_PROBE_IDLE_MIN_MS 默认 0：首轮判闲即探；设为 >0 则需连续判闲达窗才探。
+// 补锚闸门（时段/日上限/冷却）——边界追赶前先问一遍，免得白等 3 分钟
+function canAutoProbe(st) {
+  const h = beijingHour();
+  if (h < AUTO_PROBE_FROM || h >= AUTO_PROBE_TO) return false;
+  const today = new Date().toLocaleDateString("zh-CN", { timeZone: BEIJING });
+  const cnt = st.autoProbeDay && st.autoProbeDay.date === today ? st.autoProbeDay.count : 0;
+  if (cnt >= AUTO_PROBE_MAX_PER_DAY) return false;
+  if (now() - (st.lastAutoProbe || 0) < AUTO_PROBE_COOLDOWN_MS) return false;
+  return true;
+}
+// 纯决策：距 reset 多远才值得等（可单测，不碰网络/时钟）
+function catchUpPlan(primary, atMs = now()) {
+  const resetsAt = primary && primary.resets_at;
+  if (!resetsAt) return null;
+  const delta = resetsAt * 1000 - atMs;
+  if (delta > CATCHUP_MAX_MS) return null;   // 还早：等下个 tick 就行
+  if (delta < -CATCHUP_MAX_MS) return null;  // 已过边界太久：缓存早该更新，无需追
+  const wait = Math.max(0, delta) + CATCHUP_PAD_MS;
+  if (wait > CATCHUP_WAIT_CAP_MS) return null; // 绝不越过下一个 tick
+  return { wait, resetAt: resetsAt, delta };
+}
+// 边界追赶：等到 reset+15s 再重读，直到读到「新窗口」（reset 在未来）；读不到就退回旧快照
+async function catchUpAcrossReset(snap) {
+  const plan = catchUpPlan(snap?.rl?.primary);
+  if (!plan) return snap;
+  log(`reset boundary in ${Math.round(plan.delta / 1000)}s, waiting ${Math.round(plan.wait / 1000)}s then re-read`);
+  await sleep(plan.wait);
+  for (let i = 0; i < 3; i++) {
+    const fresh = await fetchOcxQuota(true, i > 0); // 第 2 轮起强制刷新，绕过 5 分钟缓存
+    const p = fresh?.rl?.primary;
+    if (p && p.resets_at * 1000 - now() > 60_000) {
+      log(`catch-up: new window ${p.used_percent}% (reset ${fmtT(p.resets_at * 1000)})`);
+      return fresh;
+    }
+    log(`catch-up: still old window (${p ? p.used_percent + "%" : "no data"}), retry ${i + 1}/3`);
+    if (i < 2) await sleep(5000);
+  }
+  log("catch-up: gave up, keeping previous snapshot");
+  return snap;
+}
 async function maybeAutoAnchor(st, snap) {
   const p = snap.rl?.primary;
   const idle = p && p.used_percent === 0 && windowIdle(snap);
@@ -478,6 +525,11 @@ async function monitor() {
   const snapAgeMin = Math.round((now() - snap.ts) / 6e4);
   if (src === "rollout" && snapAgeMin > 60) { log("stale rollout snapshot " + snapAgeMin + "m, skip"); return; }
   const st = loadState();
+  // 边界追赶（定案 A）：只在真能补锚的前提下才等，避免空等
+  if (src === "ocx" && canAutoProbe(st)) {
+    const crossed = await catchUpAcrossReset(snap);
+    if (crossed && crossed !== snap) snap = crossed;
+  }
   // 迁移（2026-10-13）：提前哨 60%→75%；已报过更高级别时低级别一并标记，避免升级/跳档后重报一条
   for (const k of Object.keys(st.windowAlerts || {})) {
     const a = st.windowAlerts[k];
@@ -648,9 +700,31 @@ function windowTest() {
   console.log("迁移 wk ->", k2, "| 已报级别:", st2.windowAlerts[k2]);
 }
 
+// ---------- self-test: 边界追赶决策（纯函数，不碰网络） ----------
+function catchUpTest() {
+  const base = 1792600000; // 固定时刻，仅用于比较
+  const t0 = base * 1000;
+  const cases = [
+    ["重置还有 10 分钟", base + 600, t0, null],
+    ["重置还有 3 分 01 秒", base + 181, t0, null],
+    ["重置还有 3 分钟", base + 180, t0, 195000],
+    ["重置还有 10 秒", base + 10, t0, 25000],
+    ["重置还有 0 秒", base, t0, 15000],
+    ["刚过重置 20 秒", base - 20, t0, 15000],
+    ["已过重置 5 分钟", base - 300, t0, null],
+    ["无数据", null, t0, null],
+  ];
+  for (const [name, resetSec, at, want] of cases) {
+    const plan = catchUpPlan(resetSec == null ? null : { resets_at: resetSec }, at);
+    const got = plan ? plan.wait : null;
+    console.log(`${got === want ? "PASS" : "FAIL"}  ${name} -> wait=${got}${want ? ` (${Math.round(got / 1000)}s)` : "(不追赶)"}`);
+  }
+}
+
 // ---------- main ----------
 try {
   if (process.env.WINDOW_TEST === "1") windowTest();
+  else if (process.env.CATCHUP_TEST === "1") catchUpTest();
   else if (process.env.PROBE_TEST === "1") console.log("probe:", probeOnce(), "marker:", BACKGROUND_CALLS);
   else if (process.env.CREDIT_TEST === "1") await creditTest();
   else if (process.env.CARD_TEST === "1") await cardTest();
