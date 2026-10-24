@@ -371,7 +371,12 @@ function inQuietHours() { const h = beijingHour(); return h >= 23 || h < 8; }
 // 真锚定后该差值 < 整窗长并持续缩小。rollout 快照无 observedAt → 不触发。
 function windowIdle(snap) {
   const p = snap?.rl?.primary, obs = snap?.observedAt, win = snap?.windowSeconds || 18000;
-  if (!p || !p.resets_at || obs == null) return false;
+  if (!p || !p.resets_at) return false;
+  // 观测停摆兜底（2026-10-24）：睡眠/断网期间 relay 不再采样，快照会停在旧窗口，
+  // 表现为「用量 0% + 重置时刻已过期」。此时窗口早已归零且无人认领，正是该补的时机，
+  // 不能因为 reset−obs 不足整窗就判成「非空闲」。
+  if (p.used_percent === 0 && p.resets_at * 1000 <= now()) return true;
+  if (obs == null) return false;
   return (p.resets_at - obs / 1000) >= win - 10;
 }
 // 自动补锚：09:00–21:00 且窗口空闲时就探一次（探完锚点落下，条件自失效，天然不循环）
@@ -529,6 +534,17 @@ async function monitor() {
   if (src === "ocx" && canAutoProbe(st)) {
     const crossed = await catchUpAcrossReset(snap);
     if (crossed && crossed !== snap) snap = crossed;
+    // 醒来补齐（2026-10-24）：睡眠/断网导致观测停摆，快照停在「0% + 重置已过期」。
+    // 先强制刷新一次拿最新窗口，再交给 maybeAutoAnchor 判定；零 LLM，不额外花钱。
+    const p0 = snap?.rl?.primary;
+    if (p0 && p0.used_percent === 0 && p0.resets_at * 1000 <= now()) {
+      const fresh = await fetchOcxQuota(true, true);
+      if (fresh) {
+        snap = fresh;
+        const p1 = snap.rl?.primary;
+        log(`wake catch-up: refresh stale snapshot -> ${p1 ? p1.used_percent + "%" : "no data"}`);
+      }
+    }
   }
   // 迁移（2026-10-13）：提前哨 60%→75%；已报过更高级别时低级别一并标记，避免升级/跳档后重报一条
   for (const k of Object.keys(st.windowAlerts || {})) {
