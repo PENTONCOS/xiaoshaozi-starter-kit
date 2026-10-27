@@ -45,6 +45,59 @@ export function statusTag(status) {
   return tag(map[key] || status, STATUS_COLOR[key] || 'neutral');
 }
 
+
+// ---------------------------------------------------------------- 场景自动分型
+export function classifyScene(m) {
+  if (m.scene) return m.scene;
+  const t = String(m.title || '');
+  const topicText = (m.topics || []).map((x) => `${x.title || ''} ${(x.points || []).join(' ')}`).join(' ');
+  const nDec = (m.decisions || []).length;
+  const nAct = (m.actions || []).length;
+  const nOpt = (m.options || []).length;
+  if (/复盘|回顾|retro/i.test(t + topicText) && /做得|待改进|改进/.test(topicText)) return 'retro';
+  if (nOpt >= 2) return 'decision-focus';
+  if (nDec <= 1 && nAct >= 2) return 'action-tracker';
+  return 'standard';
+}
+
+const SCENE_META = {
+  'decision-focus': { label: '决策导向型', header: 'turquoise' },
+  'action-tracker': { label: '行动追踪型', header: 'orange' },
+  'retro': { label: '复盘型', header: 'green' },
+  'standard': { label: '标准型', header: 'blue' },
+};
+
+function verdictTag(v) {
+  const s = String(v || '');
+  if (/采用|优先|主证据|采纳/.test(s)) return tag(s, 'green');
+  if (/剔除|不用|否决|放弃/.test(s)) return tag(s, 'red');
+  if (/兜底|备用|暂缓/.test(s)) return tag(s, 'orange');
+  return tag(s || '—', 'neutral');
+}
+
+function optionRow(o, simple) {
+  if (simple) {
+    const bits = [];
+    if (o.pros) bits.push(`优点：${esc(o.pros)}`);
+    if (o.cons) bits.push(`缺点：${esc(o.cons)}`);
+    if (o.verdict) bits.push(`结论：${esc(o.verdict)}`);
+    return mdBlock(`**${esc(o.name)}**${bits.length ? `\n　${bits.join('｜')}` : ''}`);
+  }
+  return {
+    tag: 'column_set',
+    flex_mode: 'none',
+    background_style: 'grey',
+    columns: [
+      { tag: 'column', width: 'weighted', weight: 2, vertical_align: 'top',
+        elements: [mdBlock(`**${esc(o.name)}**`)] },
+      { tag: 'column', width: 'weighted', weight: 5, vertical_align: 'top',
+        elements: [mdBlock(`${o.pros ? `优点：${esc(o.pros)}\n` : ''}${o.cons ? `缺点：${esc(o.cons)}` : ''}`)] },
+      { tag: 'column', width: 'weighted', weight: 2, vertical_align: 'top',
+        elements: [mdBlock(o.verdict ? verdictTag(o.verdict) : '—')] },
+    ],
+  };
+}
+
 // ---------------------------------------------------------------- markdown
 
 export function toMarkdown(m) {
@@ -146,7 +199,10 @@ function hr() {
   return { tag: 'hr' };
 }
 
-export function toCard(m) {
+export function toCard(m, opts = {}) {
+  const simple = !!opts.simple || process.env.SIMPLE_CARD === '1';
+  const scene = classifyScene(m);
+  const meta = SCENE_META[scene] || SCENE_META.standard;
   const els = [];
 
   // 元信息行
@@ -161,15 +217,38 @@ export function toCard(m) {
     els.push(mdBlock(m.keywords.slice(0, 12).map((k) => tag(k, 'blue')).join(' ')));
   }
 
+  // 统计条：一眼看出这场会的"体量"
+  const stats = [];
+  if (m.topics?.length) stats.push(tag(`议题 ${m.topics.length}`, 'blue'));
+  if (m.decisions?.length) stats.push(tag(`决议 ${m.decisions.length}`, 'green'));
+  if (m.actions?.length) stats.push(tag(`待办 ${m.actions.length}`, 'orange'));
+  if (m.risks?.length) stats.push(tag(`未决 ${m.risks.length}`, 'red'));
+  stats.push(tag(meta.label, 'turquoise'));
+  els.push(mdBlock(stats.join(' ')));
+
   if (m.caveat) {
-    els.push(hr());
-    els.push(mdBlock(`> ${esc(m.caveat)}`));
+    els.push({ tag: 'note', elements: [{ tag: 'plain_text', content: esc(m.caveat).slice(0, 800) }] });
   }
 
   if (m.tldr?.length) {
-    els.push(hr());
     els.push(sectionTitle('一句话结论'));
     els.push(mdBlock(m.tldr.map((l) => `· ${esc(l)}`).join('\n')));
+  }
+
+  if (m.options?.length) {
+    els.push(hr());
+    els.push(sectionTitle('🧩 方案对比'));
+    if (simple) {
+      els.push(mdBlock(m.options.map((o) => {
+        const bits = [];
+        if (o.pros) bits.push(`优点：${esc(o.pros)}`);
+        if (o.cons) bits.push(`缺点：${esc(o.cons)}`);
+        if (o.verdict) bits.push(`结论：${esc(o.verdict)}`);
+        return `**${esc(o.name)}**${bits.length ? `\n　${bits.join('｜')}` : ''}`;
+      }).join('\n\n')));
+    } else {
+      for (const o of m.options) els.push(optionRow(o, false));
+    }
   }
 
   if (m.decisions?.length) {
@@ -181,6 +260,11 @@ export function toCard(m) {
       return `**${i + 1}.** ${esc(text)}${extra ? `\n　${esc(extra)}` : ''}`;
     });
     els.push(mdBlock(lines.join('\n')));
+  }
+
+  if (m.reasoning?.length) {
+    els.push(sectionTitle('📐 决策依据'));
+    els.push(mdBlock(m.reasoning.map((r) => `· ${esc(r)}`).join('\n')));
   }
 
   if (m.actions?.length) {
@@ -197,10 +281,11 @@ export function toCard(m) {
   if (m.topics?.length) {
     els.push(hr());
     els.push(sectionTitle('🗂 议题讨论'));
-    for (const t of m.topics) {
+    const blocks = m.topics.map((t) => {
       const points = (t.points || []).map((p) => `· ${esc(p)}`).join('\n');
-      els.push(mdBlock(`**${esc(t.title)}**\n${points}`));
-    }
+      return `**${esc(t.title)}**\n${points}`;
+    });
+    els.push(mdBlock(blocks.join('\n\n')));
   }
 
   if (m.risks?.length) {
@@ -213,6 +298,11 @@ export function toCard(m) {
     els.push(hr());
     els.push(sectionTitle('🧭 解读'));
     els.push(mdBlock(m.analysis.map((p) => esc(p)).join('\n\n')));
+  }
+
+  // 元素数保护：递归计数（含 column_set 内部），超过 32 才退回纯文本
+  if (!simple && countEls(els) > 34 && m.options?.length) {
+    return toCard(m, { simple: true });
   }
 
   // 体积保护：超限时按从后往前删减议题细节
@@ -232,11 +322,34 @@ export function toCard(m) {
   return {
     config: { wide_screen_mode: true, update_multi: true },
     header: {
-      template: m.headerTemplate || 'blue',
+      template: m.headerTemplate || meta.header,
       title: { tag: 'plain_text', content: `📋 ${m.title}`.slice(0, 100) },
     },
     elements: els,
   };
+}
+
+
+// 飞书的元素配额把 column_set 内部元素也算进去，必须递归数
+function countEls(els) {
+  let n = 0;
+  for (const e of els) {
+    n += 1;
+    if (e.tag === 'column_set') for (const c of e.columns || []) n += countEls(c.elements || []);
+    if (e.tag === 'collapsible_panel') n += countEls(e.elements || []);
+  }
+  return n;
+}
+
+// 拆成两张卡：决策摘要（带分栏）+ 详情，绕开单卡元素上限
+export function toCards(m, opts = {}) {
+  const head = { ...m };
+  const summaryCard = toCard({ ...head, reasoning: [], topics: [], risks: [], analysis: [], nextMeeting: undefined }, opts);
+  const detailCard = toCard({ ...head, tldr: [], options: [], decisions: [], actions: [] }, { ...opts, simple: true });
+  const n1 = countEls(summaryCard.elements), n2 = countEls(detailCard.elements);
+  summaryCard.header.title.content = `📋 ${String(m.title).slice(0, 80)}（1/2 摘要）`.slice(0, 100);
+  detailCard.header.title.content = `📋 ${String(m.title).slice(0, 80)}（2/2 详情）`.slice(0, 100);
+  return { cards: [summaryCard, detailCard], counts: [n1, n2] };
 }
 
 // ---------------------------------------------------------------- quick card

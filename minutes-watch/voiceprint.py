@@ -13,7 +13,7 @@
   - 声纹是生物特征，只存向量不存原始音频；库目录 700，文件 600
   - 匹配相似度低于阈值时保持 S0/S1，不猜名字
 """
-import argparse, json, os, subprocess, sys, wave
+import argparse, json, os, subprocess, sys, tempfile, wave
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -95,8 +95,11 @@ def cmd_build_samples(a):
         subprocess.run(["afconvert", "-f", "m4af", "-d", "aac", "-b", "64000", wav_path, m4a_path],
                        check=False, capture_output=True)
 
-        # 声纹：对每一段单独取 embedding 再平均（比整段拼起来更稳）
-        E, idx = diar.embed_segments(samples, [{"start": s["start"], "end": s["end"]} for s in picked])
+        # 声纹：必须与 identify 一致 —— 用该簇全部段的 embedding 平均。
+        # 2026-10-27 修正：原先用「最长若干段」子集，同一簇算出与元化 0.6823，
+        # 而 identify 全段平均是 0.4847，差 0.2。挑段法受个别混音段影响太大，不可用于入库。
+        # picked 仅用于生成试听音频，不参与声纹。
+        E, idx = diar.embed_segments(samples, [{"start": s["start"], "end": s["end"]} for s in ss])
         if len(E) == 0:
             print(f"  {spk}: 声纹提取失败（片段太短）", flush=True)
             emb = None
@@ -124,23 +127,59 @@ def cmd_build_samples(a):
 
 
 def cmd_enroll(a):
+    """入库：三种来源，统一落到「本场信道居中」空间。
+    --from-eres-npz : ERes2Net 512 维（线上库当前空间）
+    --from-samples  : build-samples 产出的 192 维 sherpa 向量
+    --audio         : 单段参考音频
+    """
     os.makedirs(VOICE_DIR, exist_ok=True)
     os.chmod(VOICE_DIR, 0o700)
-    if a.from_samples:
+    gpath = os.path.join(VOICE_DIR, "gallery.json")
+    gal = json.load(open(gpath, encoding="utf8")) if os.path.exists(gpath) else {}
+    lib_eres = any("centered-eres" in (x.get("space") or "")
+                   for e in gal.values() for x in (e.get("vectors") or []))
+
+    if getattr(a, "from_eres_npz", None):
+        Z = np.load(a.from_eres_npz)
+        if a.label not in Z.files:
+            sys.exit(f"{a.from_eres_npz} 里没有 {a.label}")
+        peers = [Z[k].mean(axis=0) for k in Z.files if not k.endswith("_t")]
+        if len(peers) < 2:
+            sys.exit("该 npz 只有 1 个簇，无法做信道居中；请用含多人的整场录音入库")
+        emb = Z[a.label].mean(axis=0)
+        emb = emb - np.mean(peers, axis=0)
+        space = "centered-eres-v1"
+    elif a.from_samples:
         src = os.path.join(a.from_samples, f"{a.label}.npy")
         if not os.path.exists(src):
             sys.exit(f"找不到 {src}")
         emb = np.load(src)
+        peers = [os.path.join(a.from_samples, f) for f in os.listdir(a.from_samples) if f.endswith(".npy")]
+        if len(peers) >= 2:
+            emb = emb - np.mean([np.load(x) for x in peers], axis=0)
+            space = "centered-v1"
+        else:
+            space = "raw-1src"
     else:
+        if not a.audio:
+            sys.exit("需要 --from-eres-npz / --from-samples / --audio 三者之一")
         samples = load_wav(a.audio)
         segs = [{"start": 0.0, "end": len(samples) / SR}]
         E, idx = diar.embed_segments(samples, segs)
         if len(E) == 0:
             sys.exit("参考音频里没提取到有效声纹（太短或全是静音）")
         emb = E.mean(axis=0)
+        space = "raw-1src"
+
     emb = emb / (np.linalg.norm(emb) + 1e-9)
 
-    # 每个来源单独存一个向量，避免跨场互相污染
+    # 空间与线上库不符时拒绝写入，避免 dim 不匹配把库弄坏
+    if lib_eres and space != "centered-eres-v1":
+        sys.exit(f"线上库是 ERes2Net(512维) 空间，本次算出的是 {space}({emb.shape[0]}维)；"
+                 f"请改用 --from-eres-npz 入库（先跑 embed_eres.py）")
+    if lib_eres != (emb.shape[0] == 512):
+        sys.exit(f"维度与库空间不一致：库 eres={lib_eres}，本次 {emb.shape[0]} 维")
+
     source = a.source or "manual"
     safe_src = "".join(c if c.isalnum() or c in "-_." else "_" for c in source)[:60]
     fname = f"{a.name}__{safe_src}.npy"
@@ -148,48 +187,71 @@ def cmd_enroll(a):
     np.save(path, emb.astype(np.float32))
     os.chmod(path, 0o600)
 
-    gpath = os.path.join(VOICE_DIR, "gallery.json")
-    gal = json.load(open(gpath, encoding="utf8")) if os.path.exists(gpath) else {}
     ent = gal.get(a.name) or {}
     vecs = ent.get("vectors")
-    if vecs is None:                      # 兼容旧格式（单个 file）
+    if vecs is None:
         vecs = []
         if ent.get("file"):
             vecs.append({"file": ent["file"], "source": "legacy",
                          "dim": ent.get("dim", int(emb.shape[0])),
                          "enrolledAt": ent.get("enrolledAt", "")})
     vecs = [v for v in vecs if v.get("file") != fname]
-    vecs.append({"file": fname, "source": source, "dim": int(emb.shape[0]),
+    vecs.append({"file": fname, "source": source, "dim": int(emb.shape[0]), "space": space,
                  "enrolledAt": __import__("datetime").datetime.now().astimezone().isoformat(timespec="seconds")})
     gal[a.name] = {"dim": int(emb.shape[0]), "vectors": vecs}
     json.dump(gal, open(gpath, "w", encoding="utf8"), ensure_ascii=False, indent=2)
     os.chmod(gpath, 0o600)
-    print(f"已登记声纹: {a.name} 来源 {source} -> {path}（该人共 {len(vecs)} 个来源向量）")
+    print(f"已登记声纹: {a.name} 来源 {source} 空间 {space} -> {path}（该人共 {len(vecs)} 个来源向量）")
 
 
 def cmd_identify(a):
+    """居中空间优先：库里若有 centered-v1 向量，则按「本场信道居中 + 逐来源取最大分」匹配。"""
     gpath = os.path.join(VOICE_DIR, "gallery.json")
     if not os.path.exists(gpath):
-        sys.exit(f"声纹库为空：{VOICE_DIR}/gallery.json 不存在，先 enroll")
+        sys.exit(f"声纹库为空：{gpath} 不存在，先 enroll")
     gal = json.load(open(gpath, encoding="utf8"))
-    names = {}
-    for k, v in gal.items():
-        files = [x["file"] for x in v["vectors"]] if v.get("vectors") else ([v["file"]] if v.get("file") else [])
-        mats = [np.load(os.path.join(VOICE_DIR, f)) for f in files if os.path.exists(os.path.join(VOICE_DIR, f))]
-        if not mats:
+    people, centered = {}, False
+    for name, ent in gal.items():
+        if ent.get("disabled"):
+            print(f"[identify] 跳过已停用声纹: {name}（{ent.get('disabledReason','')}）", file=sys.stderr)
             continue
-        m = np.mean(mats, axis=0)
-        names[k] = m / (np.linalg.norm(m) + 1e-9)
-    if not names:
+        vs = ent.get("vectors")
+        files = [x["file"] for x in vs] if vs else ([ent["file"]] if ent.get("file") else [])
+        if vs and any(x.get("space") == "centered-v1" for x in vs):
+            centered = True
+        vecs = []
+        for f in files:
+            p2 = os.path.join(VOICE_DIR, f)
+            if not os.path.exists(p2):
+                continue
+            m = np.load(p2).astype(np.float32)
+            vecs.append(m / (np.linalg.norm(m) + 1e-9))
+        if vecs:
+            people[name] = vecs
+    if not people:
         sys.exit("声纹库里没有可用的向量文件")
 
-    samples = load_wav(a.audio)
+    # 判断用哪个声纹模型：库里若是 512 维 eres 空间则走 ERes2Net 桥
+    eres = any("centered-eres" in (x.get("space") or "")
+               for e in gal.values() for x in (e.get("vectors") or []))
     d = json.load(open(a.diar, encoding="utf8"))
     by = {}
     for s in d.get("segments") or []:
         by.setdefault(s["speaker"], []).append(s)
+    if eres:
+        npz = os.path.join(tempfile.gettempdir(), f"eres-{os.getpid()}.npz")
+        py = os.path.expanduser("~/.local/venvs/sv/bin/python")
+        bridge = os.path.join(os.path.dirname(os.path.abspath(__file__)), "embed_eres.py")
+        r = subprocess.run([py, bridge, a.audio, "--diar", a.diar, "--out", npz],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"ERes2Net 提取失败: {r.stderr.strip()[-400:]}")
+        Z = np.load(npz)
+        embs = {k: Z[k].mean(axis=0) for k in Z.files if not k.endswith("_t")}
+    else:
+        samples = load_wav(a.audio)
+        embs = {}
 
-    # 人工标注的多人群：直接跳过，不输出任何名字（避免混音被误判成其中某人）
     skip = set(x.strip() for x in (a.skip or "").split(",") if x.strip())
     mapfile = os.path.join(os.path.dirname(os.path.abspath(a.diar)), "speaker-map.json")
     if os.path.exists(mapfile) and not a.no_map:
@@ -201,27 +263,50 @@ def cmd_identify(a):
         except Exception:
             pass
 
+    # 先算每簇的平均声纹；居中模式需要先拿到本场的信道中心
+    if not eres:
+        for spk, ss in sorted(by.items()):
+            E, _ = diar.embed_segments(samples, [{"start": s["start"], "end": s["end"]} for s in ss])
+            if len(E):
+                embs[spk] = E.mean(axis=0)
+    if centered and len(embs) >= 2:
+        ch = np.mean(list(embs.values()), axis=0)
+        embs = {k: (v - ch) for k, v in embs.items()}
+        print(f"[identify] 居中模式：本场 {len(embs)} 簇，信道范数 {np.linalg.norm(ch):.3f}", file=sys.stderr)
+    elif centered:
+        print("[identify] 本场簇数 <2，无法做信道居中；结果不可靠", file=sys.stderr)
+
+    if a.threshold is not None:
+        thr = a.threshold
+    elif eres:
+        thr = 0.35
+    elif centered:
+        thr = 0.45
+    else:
+        thr = 0.55
     result = {}
-    for spk, ss in sorted(by.items()):
+    for spk, emb in sorted(embs.items()):
         if spk in skip:
             result[spk] = {"name": None, "skipped": "mixed-cluster", "reason": "人工标注为多人混合，跳过声纹匹配"}
             continue
-        E, _ = diar.embed_segments(samples, [{"start": s["start"], "end": s["end"]} for s in ss])
-        if len(E) == 0:
-            result[spk] = {"name": None, "reason": "no embedding"}
-            continue
-        emb = E.mean(axis=0)
-        scores = {n: cos(emb, g) for n, g in names.items()}
-        best = max(scores, key=scores.get) if scores else None
-        ok = best and scores[best] >= a.threshold
-        result[spk] = {"name": best if ok else None,
-                       "score": round(scores[best], 4) if best else None,
-                       "threshold": a.threshold,
-                       "all": {k: round(v, 4) for k, v in sorted(scores.items(), key=lambda x: -x[1])}}
+        emb = emb / (np.linalg.norm(emb) + 1e-9)
+        scores = {n: max(float(np.dot(emb, v)) for v in vs) for n, vs in people.items()}
+        ranked = sorted(scores.items(), key=lambda x: -x[1])
+        best = ranked[0][0]
+        s1 = ranked[0][1]
+        s2 = ranked[1][1] if len(ranked) > 1 else 0.0
+        margin = s1 - s2
+        ok = s1 >= thr
+        thin = ok and margin < a.margin
+        result[spk] = {"name": best if (ok and not thin) else None,
+                       "score": round(s1, 4), "margin": round(margin, 4),
+                       "threshold": thr, "space": ("centered-eres-v1" if eres else ("centered-v1" if centered else "raw")),
+                       "suspect": ("margin-too-small" if thin else None),
+                       "reason": (f"领先不足 {a.margin}（{best} {s1:.4f} vs {ranked[1][0]} {s2:.4f}）" if thin else None),
+                       "all": {k: round(v, 4) for k, v in ranked}}
     print(json.dumps(result, ensure_ascii=False, indent=2))
     named = {k: v["name"] for k, v in result.items() if v.get("name")}
-    skipped = [k for k, v in result.items() if v.get("skipped")]
-    print(f"\n[identify] 识别 {len(named)} 人 {named}，跳过 {len(skipped)} 个混合簇 {skipped}", file=sys.stderr)
+    print(f"\n[identify] 识别 {len(named)} 人 {named}", file=sys.stderr)
 
 
 ap = argparse.ArgumentParser()
@@ -235,13 +320,16 @@ p.set_defaults(fn=cmd_build_samples)
 p = sub.add_parser("enroll", help="登记某人声纹")
 p.add_argument("name"); p.add_argument("--from-samples"); p.add_argument("--audio")
 p.add_argument("--label", default="S0"); p.add_argument("--source", default="", help="来源标注，如会议 slug")
+p.add_argument("--from-eres-npz", default=None, help="ERes2Net 逐簇向量 npz（embed_eres.py 产出）")
 p.set_defaults(fn=cmd_enroll)
 
 p = sub.add_parser("identify", help="用声纹库标真人名")
 p.add_argument("audio"); p.add_argument("--diar", required=True)
-p.add_argument("--threshold", type=float, default=MATCH_THRESHOLD)
+p.add_argument("--threshold", type=float, default=None, help="默认：居中库 0.45，原始库 0.55")
 p.add_argument("--skip", default="", help="跳过的簇标签，逗号分隔，如 S2,S3")
 p.add_argument("--no-map", action="store_true", help="忽略同目录的 speaker-map.json")
+p.add_argument("--allow-ambiguous", action="store_true", help="前两名都过阈值时也出名字（默认不出）")
+p.add_argument("--margin", type=float, default=0.12, help="第一名需领先第二名的幅度，默认 0.12")
 p.set_defaults(fn=cmd_identify)
 
 a = ap.parse_args()

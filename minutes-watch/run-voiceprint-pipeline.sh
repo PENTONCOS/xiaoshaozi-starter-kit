@@ -34,6 +34,11 @@ RC=$?
 log "聚类退出码 $RC"
 [ $RC -ne 0 ] && { log "聚类失败，终止"; exit $RC; }
 
+log "=== step 2.5 生成 ERes2Net 向量（供入库用） ==="
+SV_PY="$HOME/.local/venvs/sv/bin/python"
+"$SV_PY" embed_eres.py "$AUDIO" --diar "$DIR/$BASE.diar.json" --out "$DIR/$BASE.eres.npz" 2>/dev/null
+log "ERes2Net 向量退出码 $?（失败不阻断主流程）"
+
 log "=== step 3/3 声纹比对 ==="
 "$DIAR_PY" -u voiceprint.py identify "$AUDIO" --diar "$DIR/$BASE.diar.json" \
   > "$DIR/$BASE.identify.json" 2> "$DIR/$BASE.identify.err"

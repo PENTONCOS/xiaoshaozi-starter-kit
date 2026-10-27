@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { toMarkdown, toCard } from './lib/render.mjs';
+import { toMarkdown, toCard, toCards } from './lib/render.mjs';
 import { sendApp } from './lib/config.mjs';
 import { tenantToken, http } from './lib/feishu.mjs';
 
@@ -33,7 +33,9 @@ const mdPath = path.join(dir, `${base}.md`);
 fs.writeFileSync(mdPath, toMarkdown(m), 'utf8');
 console.log('markdown:', mdPath, fs.statSync(mdPath).size, 'bytes');
 
-const card = doCard ? toCard(m) : null;
+const split = rest.includes('--split');
+const bundle = doCard ? (split ? toCards(m) : { cards: [toCard(m)], counts: [] }) : null;
+const card = bundle ? bundle.cards[0] : null;
 if (card) {
   const cardPath = path.join(dir, `${base}.card.json`);
   fs.writeFileSync(cardPath, JSON.stringify(card, null, 2), 'utf8');
@@ -51,10 +53,26 @@ if (card && chatId) {
   });
   console.log('send:', status, 'code', json.code, json.msg || '');
   if (json.code !== 0) {
-    console.error(JSON.stringify(json).slice(0, 800));
-    sent = false;
+    console.error('第一步失败，退回纯文本版重发：', JSON.stringify(json).slice(0, 300));
+    const fallback = toCard(m, { simple: true });
+    const r2 = await http('POST', '/im/v1/messages', {
+      token, query: { receive_id_type: 'chat_id' },
+      body: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(fallback) },
+    });
+    console.log('fallback send:', r2.status, 'code', r2.json.code, r2.json.msg || '');
+    if (r2.json.code !== 0) { sent = false; } else { console.log('message_id:', r2.json.data?.message_id); }
   } else {
     console.log('message_id:', json.data?.message_id);
+    // 第二张卡（详情）
+    if (bundle && bundle.cards.length > 1) {
+      for (const c2 of bundle.cards.slice(1)) {
+        const r3 = await http('POST', '/im/v1/messages', {
+          token, query: { receive_id_type: 'chat_id' },
+          body: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(c2) },
+        });
+        console.log('card2 send:', r3.status, 'code', r3.json.code, '| message_id:', r3.json.data?.message_id);
+      }
+    }
   }
 }
 
