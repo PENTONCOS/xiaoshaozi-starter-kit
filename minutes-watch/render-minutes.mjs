@@ -25,6 +25,24 @@ const doArchive = !rest.includes('--no-archive');
 const sendIdx = rest.indexOf('--send');
 const chatId = sendIdx >= 0 ? rest[sendIdx + 1] : null;
 
+// 纪要保真门禁（2026-10-28 定案）：决议必须能回原文，不通过则阻止发卡
+if (chatId && !rest.includes('--force')) {
+  const gates = [
+    ['verify-minutes.mjs', '纪要保真（写错检查）', '给决议补时间戳，或按逐字稿原话改写决议句'],
+    ['scan-decisions.mjs', '反向覆盖（写漏检查）', '把漏掉的写成决议，或加进 ignoredDecisions 并写明为什么不是决议'],
+  ];
+  for (const [script, label, fix] of gates) {
+    try {
+      execFileSync(process.execPath, [path.join(here, script), dataPath], { stdio: 'inherit' });
+    } catch {
+      console.error(`\n✗ ${label} 未通过 → 已阻止发送`);
+      console.error(`  修：${fix}`);
+      console.error('  确认无碍仍要发：加 --force');
+      process.exit(1);
+    }
+  }
+}
+
 const m = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
 const dir = path.dirname(path.resolve(dataPath));
 const base = path.basename(dataPath).replace(/\.json$/, '');
