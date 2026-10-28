@@ -187,7 +187,7 @@ function burnTail5h(usedPct, jump, minsLeft, resetTs) {
   const exhaustMin = perMin > 0 ? remainPp / perMin : Infinity;
   if (minsLeft > 0 && exhaustMin < minsLeft) {
     const rec30 = Math.max(1, Math.floor(((remainPp - SAFE_RESERVE_PP) / minsLeft) * BURN_WINDOW_MIN));
-    return `照此速度约 **${fmtT(now() + exhaustMin * 6e4)}** 就会用光（早于 ${fmtT(resetTs)} 刷新）\n想撑到刷新并留 ${SAFE_RESERVE_PP}% 余量：把速度压到 ≤ **${rec30}pp/30min**（现在 ${Math.round(jump)}pp/30min）`;
+    return `照此速度约 **${fmtT(now() + exhaustMin * 6e4)}** 就会用光（早于 ${fmtT(resetTs)} 刷新）\n想撑到刷新并留 ${SAFE_RESERVE_PP}% 余量：把速度压到 ≤ **${rec30}%/30min**（现在 ${Math.round(jump)}%/30min）`;
   }
   const proj = minsLeft > 0 ? Math.min(100, Math.round(usedPct + perMin * Math.min(minsLeft, 300))) : usedPct;
   return `按此速率到重置预计 **${proj}%**（不会用光）`;
@@ -199,7 +199,7 @@ function burnTailWeekly(usedPct, jump, daysLeft, resetTs) {
   const exhaustDays = wPerDay > 0 ? wRemain / wPerDay : Infinity;
   if (exhaustDays < daysLeft) {
     const recDay = Math.max(1, Math.floor((wRemain - SAFE_RESERVE_PP) / daysLeft));
-    return "照此速度约 **" + fmtDT(now() + exhaustDays * 864e5) + "** 就会用光（早于 " + fmtDT(resetTs) + " 刷新）\n想撑到刷新并留 " + SAFE_RESERVE_PP + "% 余量：把日耗压到 ≤ **" + recDay + "pp/天**（现在约 " + Math.round(wPerDay) + "pp/天）";
+    return "照此速度约 **" + fmtDT(now() + exhaustDays * 864e5) + "** 就会用光（早于 " + fmtDT(resetTs) + " 刷新）\n想撑到刷新并留 " + SAFE_RESERVE_PP + "% 余量：把日耗压到 ≤ **" + recDay + "%/天**（现在约 " + Math.round(wPerDay) + "%/天）";
   }
   const wProj = Math.min(100, Math.round(usedPct + wPerDay * daysLeft));
   return "按此速率到重置预计 **" + wProj + "%**（不会用光）";
@@ -594,7 +594,7 @@ async function monitor() {
         st.burnLast = now();
         const minsLeft = (p.resets_at * 1000 - now()) / 6e4;
         const tail = burnTail5h(last.p5, jump, minsLeft, p.resets_at * 1000);
-        card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 消耗过快" } }, elements: [{ tag: "markdown", content: `${base}\n近 ${BURN_WINDOW_MIN} 分钟涨 **${jump}pp**｜${tail}` }] };
+        card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 消耗过快" } }, elements: [{ tag: "markdown", content: `${base}\n近 ${BURN_WINDOW_MIN} 分钟涨 **${jump}%**｜${tail}` }] };
       }
     }
   }
@@ -623,7 +623,7 @@ async function monitor() {
           st.wkBurnLast = now();
           const wDaysLeft = Math.max(0.01, (sw.resets_at * 1000 - now()) / 864e5);
           const wTail = burnTailWeekly(sw.used_percent, wJump, wDaysLeft, sw.resets_at * 1000);
-          card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 周额度消耗过快" } }, elements: [{ tag: "markdown", content: wBase + "\n近 3 小时涨 **" + wJump + "pp**｜" + wTail }] };
+          card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 周额度消耗过快" } }, elements: [{ tag: "markdown", content: wBase + "\n近 3 小时涨 **" + wJump + "%**｜" + wTail }] };
         }
       }
     }
@@ -671,14 +671,14 @@ async function burnedTest() {
   const ml = Number(process.env.BURN_TEST_MINSLEFT || 200);
   const reset5 = now() + ml * 6e4;
   const base5 = `5h 窗口已用 **${u5}%**（${fmtT(reset5)} 重置，${remainStr(Math.floor(reset5 / 1000))}）`;
-  const c5 = { header: { template: "orange", title: { tag: "plain_text", content: "【测试】🔥 Codex 消耗过快" } }, elements: [{ tag: "markdown", content: `${base5}\n近 ${BURN_WINDOW_MIN} 分钟涨 **${j5}pp**｜${burnTail5h(u5, j5, ml, reset5)}` }] };
+  const c5 = { header: { template: "orange", title: { tag: "plain_text", content: "【测试】🔥 Codex 消耗过快" } }, elements: [{ tag: "markdown", content: `${base5}\n近 ${BURN_WINDOW_MIN} 分钟涨 **${j5}%**｜${burnTail5h(u5, j5, ml, reset5)}` }] };
   await sendAlert(c5); log("alert sent(test):", c5.header.title.content);
 
   const uw = Number(process.env.BURN_TEST_WUSED || 21);
   const jw = Number(process.env.BURN_TEST_WJUMP || 12);
   const dl = Number(process.env.BURN_TEST_WDAYSLEFT || 5.27);
   const resetw = now() + dl * 864e5;
-  const cw = { header: { template: "orange", title: { tag: "plain_text", content: "【测试】🔥 Codex 周额度消耗过快" } }, elements: [{ tag: "markdown", content: `周窗口已用 **${uw}%**（${fmtDT(resetw)} 重置）\n近 3 小时涨 **${jw}pp**｜${burnTailWeekly(uw, jw, dl, resetw)}` }] };
+  const cw = { header: { template: "orange", title: { tag: "plain_text", content: "【测试】🔥 Codex 周额度消耗过快" } }, elements: [{ tag: "markdown", content: `周窗口已用 **${uw}%**（${fmtDT(resetw)} 重置）\n近 3 小时涨 **${jw}%**｜${burnTailWeekly(uw, jw, dl, resetw)}` }] };
   await sendAlert(cw); log("alert sent(test):", cw.header.title.content);
 }
 
