@@ -392,6 +392,11 @@ async function maybeAutoConsume(st, snap, rcs) {
   log(res.ok
     ? `auto-consume: redeemed ok ${JSON.stringify(res.body).slice(0, 160)}`
     : `auto-consume: failed ${res.status ?? ""} ${JSON.stringify(res.body ?? res.error).slice(0, 200)}`);
+  // 免打扰时段不推卡（兑现照做，只压掉通知），避免半夜扰人
+  if (inQuietHours()) {
+    log(`auto-consume: card suppressed (quiet hours), result ok=${res.ok}`);
+    return res.ok;
+  }
   try {
     await sendPush({
       header: { template: res.ok ? "green" : "red", title: { tag: "plain_text", content: res.ok ? "🔄 重置卡已自动使用（到期前 1 小时）" : "🚨 重置卡自动使用失败" } },
