@@ -43,6 +43,10 @@ const CATCHUP_MAX_MS = 3 * 60 * 1000;        // 距重置 ≤3 分钟才追赶
 const CATCHUP_PAD_MS = 15 * 1000;            // 等过边界 15s 再读，避开秒级抖动
 const CATCHUP_WAIT_CAP_MS = 4 * 60 * 1000;   // 单次等待上限，绝不越过下一个 10 分钟 tick
 const BEIJING = "Asia/Shanghai";
+// 重置卡到期前自动使用（2026-10-30 用户定案）：到期前 1 小时自动兑现，避免白白作废。
+// 兑现不可逆，所以有三道闸：①距到期 ≤60min ②当前 5h/周至少有一项有用量（否则兑现没有收益）
+// ③同一张卡（按 expires_at）只兑现一次。AUTO_CONSUME_DRYRUN=1 只记日志不动手。
+const AUTO_CONSUME_BEFORE_MS = Number(process.env.AUTO_CONSUME_BEFORE_MS ?? 60 * 60 * 1000);
 
 const mode = process.argv[2] || "";
 const now = () => Date.now();
@@ -279,6 +283,7 @@ function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
 const OCX_QUOTA_URL = process.env.OCX_QUOTA_URL || "http://127.0.0.1:10100/api/codex-auth/quota";
 const OCX_REFRESH_URL = process.env.OCX_REFRESH_URL || "http://127.0.0.1:10100/api/codex-auth/accounts/refresh";
 const OCX_RESET_CREDITS_URL = "http://127.0.0.1:10100/api/codex-auth/reset-credits?accountId=__main__";
+const OCX_RESET_CONSUME_URL = "http://127.0.0.1:10100/api/codex-auth/reset-credits/consume";
 const OCX_STALE_MS = 5 * 60 * 1000; // 缓存超过 5 分钟就主动刷新（观测性、零额度）——15min 太松，阈值穿越会被漏报（2026-10-13 实测 78% vs 真实 91%）
 const EXPIRY_WARN_DAYS = 7; // 重置卡到期提醒阈值（天）
 function ocxToken() { try { return readFileSync(join(homedir(), ".opencodex/admin-api-token"), "utf8").trim(); } catch { return ""; } }
@@ -337,20 +342,106 @@ function expiringCredit(rc) {
   return best ? { exp: best.exp, daysLeft: (best.exp - now()) / 864e5 } : null;
 }
 
+// 兑现一张重置卡（不可逆）。operationId 由 relay 侧做 v4 UUID 格式校验 + 幂等去重。
+async function consumeResetCredit() {
+  const token = ocxToken();
+  if (!token) return { ok: false, error: "admin token missing" };
+  try {
+    const r = await fetch(OCX_RESET_CONSUME_URL, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token, "content-type": "application/json" },
+      body: JSON.stringify({ accountId: "__main__", operationId: crypto.randomUUID() }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const txt = await r.text();
+    let body = null;
+    try { body = JSON.parse(txt); } catch { body = txt.slice(0, 200); }
+    return { ok: r.ok, status: r.status, body };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+// 到期前 1 小时自动兑现（2026-10-30 用户定案）：别让卡白白作废。
+async function maybeAutoConsume(st, snap, rcs) {
+  if (!rcs || !Array.isArray(rcs.credits) || !rcs.credits.length) return false;
+  const ec = expiringCredit(rcs);
+  if (!ec) return false;
+  const left = ec.exp - now();
+  if (left < 0 || left > AUTO_CONSUME_BEFORE_MS) return false;
+  const key = `auto:${ec.exp}`;
+  st.autoConsumed = st.autoConsumed || {};
+  if (st.autoConsumed[key]) return false;
+  const p5 = snap?.rl?.primary?.used_percent ?? 0;
+  const pw = snap?.rl?.secondary?.used_percent ?? 0;
+  if (p5 <= 0 && pw <= 0) {
+    st.autoConsumed[key] = now();
+    saveState(st);
+    log(`auto-consume skipped: nothing to reset (5h 0%, week 0%), card expires ${fmtD(ec.exp)}`);
+    return false;
+  }
+  const mins = Math.round(left / 6e4);
+  if (process.env.AUTO_CONSUME_DRYRUN === "1") {
+    log(`[dryrun] auto-consume would redeem card expiring in ${mins}m (5h ${p5}%, week ${pw}%)`);
+    return false;
+  }
+  log(`auto-consume: redeeming card expiring in ${mins}m (5h ${p5}%, week ${pw}%)`);
+  const res = await consumeResetCredit();
+  st.autoConsumed[key] = now();
+  // 自己兑现会让数量下降，先同步 seenResetCredits，避免 usageEvents 再报一条「被使用」
+  if (res.ok) st.seenResetCredits = Math.max(0, (st.seenResetCredits ?? (snap?.resetCredits ?? 1)) - 1);
+  saveState(st);
+  log(res.ok
+    ? `auto-consume: redeemed ok ${JSON.stringify(res.body).slice(0, 160)}`
+    : `auto-consume: failed ${res.status ?? ""} ${JSON.stringify(res.body ?? res.error).slice(0, 200)}`);
+  try {
+    await sendPush({
+      header: { template: res.ok ? "green" : "red", title: { tag: "plain_text", content: res.ok ? "🔄 重置卡已自动使用（到期前 1 小时）" : "🚨 重置卡自动使用失败" } },
+      elements: [{ tag: "markdown", content: res.ok
+        ? `到期前 ${mins} 分钟自动兑现成功\n兑现前：5h 窗口 ${p5}%｜周窗口 ${pw}%\n回执：\`${JSON.stringify(res.body).slice(0, 140)}\``
+        : `到期前自动兑现失败（${res.status ?? "-"}）：${JSON.stringify(res.body ?? res.error).slice(0, 180)}\n卡还在，需要手动处理。` }],
+    });
+  } catch (e) { log("auto-consume card failed:", e.message); }
+  return res.ok;
+}
+
 // ---------- usage-change notifications -> 通知群 (zero-LLM) ----------
-function usageEvents(st, snap) {
+function usageEvents(st, snap, rcs = null) {
   const out = [];
   const rc = snap.resetCredits;
+  // 有明细就按 expires_at 区分「被用掉」和「过期作废」；没有明细退回旧行为（按数量差）
+  const exps = rcs && Array.isArray(rcs.credits)
+    ? rcs.credits.map((c) => Date.parse(c && c.expires_at)).filter(Number.isFinite)
+    : null;
   if (rc != null) {
     if (st.seenResetCredits == null) st.seenResetCredits = rc;
     else if (rc < st.seenResetCredits) {
-      out.push({
-        title: "🔄 Codex 重置卡被使用",
-        body: `重置卡被使用 **${st.seenResetCredits - rc}** 张｜剩余 **${CARD_SYM} ${rc}** 张\n5h 窗口已用 ${snap.rl.primary?.used_percent ?? "?"}%｜周窗口已用 ${snap.rl.secondary?.used_percent ?? "?"}%`,
-      });
+      let usedN = st.seenResetCredits - rc;
+      let expiredN = 0;
+      let known = false;
+      if (exps && Array.isArray(st.creditExps)) {
+        const gone = st.creditExps.filter((e) => !exps.includes(e));
+        if (gone.length) {
+          expiredN = gone.filter((e) => e <= now()).length;
+          usedN = gone.length - expiredN;
+          known = true;
+        }
+      }
+      if (!known) usedN = st.seenResetCredits - rc;
+      if (usedN > 0) {
+        out.push({
+          title: "🔄 Codex 重置卡被使用",
+          body: `重置卡被使用 **${usedN}** 张｜剩余 **${CARD_SYM} ${rc}** 张\n5h 窗口已用 ${snap.rl.primary?.used_percent ?? "?"}%｜周窗口已用 ${snap.rl.secondary?.used_percent ?? "?"}%`,
+        });
+      }
+      if (expiredN > 0) {
+        out.push({
+          title: "🎫 Codex 重置卡已过期",
+          body: `**${expiredN}** 张重置卡到期未使用，已作废｜当前剩 **${CARD_SYM} ${rc}** 张\n（到期前 1 小时会自动兑现，出现这条说明自动兑现没赶上或没满足条件）`,
+        });
+      }
       st.seenResetCredits = rc;
     } else if (rc > st.seenResetCredits) st.seenResetCredits = rc; // 新发卡：静默同步
   }
+  if (exps) st.creditExps = exps;
   const cr = snap.rl.credits?.has_credits ? Number(snap.rl.credits.balance) : null;
   if (cr != null) {
     if (st.seenCredits == null) st.seenCredits = cr;
@@ -568,7 +659,10 @@ async function monitor() {
     await sendPush(buildStatusCard(snap.rl, snap.ts, st, true, snap.resetCredits ?? null));
     log("anchor status card sent");
   }
-  const freshEvents = usageEvents(st, snap);
+  // 重置卡：到期前 1 小时自动兑现（零 LLM，只调 relay 的 consume 接口）
+  const rcsNow = await fetchResetCredits();
+  await maybeAutoConsume(st, snap, rcsNow);
+  const freshEvents = usageEvents(st, snap, rcsNow);
   if (process.env.USAGE_TEST === "1") freshEvents.push({ title: "🔄 Codex 重置卡被使用", body: `（自检）模拟消耗 1 张｜剩余 ${CARD_SYM} 3 张` });
   await flushUsage(st, freshEvents);
   const p = snap.rl.primary;
