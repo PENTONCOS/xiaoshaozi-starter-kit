@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { ROOT, HOME, sendApp, readJson } from './lib/config.mjs';
-import { tenantToken, http } from './lib/feishu.mjs';
+import { tenantToken, userToken, http } from './lib/feishu.mjs';
 
 const OUT_ROOT = path.join(HOME, 'sisyphus-output', 'meetings');
 const ASR = path.join(HOME, '.openclaw/agents/main/agent/workshop-skills/meeting-audio-transcription/scripts/transcribe.py');
@@ -92,7 +92,8 @@ async function fromLink(url) {
   const mt = url.match(/minutes\/([A-Za-z0-9]{20,32})/);
   const token = mt ? mt[1] : url.trim();
   const app = sendApp();
-  const t = await tenantToken(app);
+  // artifacts 需要 user_access_token（tenant token 会 403 2091005），这里取用户态 token
+  const t = await userToken(app);
   const { status, json } = await http('GET', `/minutes/v1/minutes/${token}/artifacts`, { token: t });
   if (json.code !== 0) {
     throw new Error(`artifacts 拉取失败: HTTP ${status} code ${json.code} ${json.msg}`);
@@ -109,7 +110,7 @@ async function fromLink(url) {
   fs.writeFileSync(path.join(dir, `${base}.transcript.txt`), txt, 'utf8');
 
   // 从妙记 transcript 抽 [speaker, start, text] → transcript.json（与音频路线同构）
-  const segs = [];
+  // 逐字稿块顺序不保证（同一秒多个说话人时可能乱序），按时间正序处理
   for (const block of txt.split(/\n(?=Speaker\s+\d+\s+\d)/)) {
     const m = block.match(/^Speaker\s+(\d+)\s+(\d{2}):(\d{2}):(\d{2})/);
     if (!m || !block.includes('\n')) continue;

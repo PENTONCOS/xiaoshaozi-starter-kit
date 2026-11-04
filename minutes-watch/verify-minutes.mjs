@@ -34,7 +34,16 @@ const HOME = os.homedir();
 const abs = (p) => (p ? p.replace(/^~/, HOME) : p);
 
 function loadTranscript(file) {
-  const raw = fs.readFileSync(file, 'utf8');
+  // 妙记路线会把带说话人标签的版本写到 .speakers.txt，优先用它
+  const spk = file.replace(/\.transcript\.txt$/, '.speakers.txt');
+  let raw;
+  if (spk !== file && fs.existsSync(spk)) {
+    const body = fs.readFileSync(spk, 'utf8').split('\n').filter((l) => !l.startsWith('#')).join('\n');
+    // [mm:ss] S1: 文本 → 伪 Speaker 头，复用同一套解析（缺小时位，按 00:mm:ss 处理）
+    raw = body.replace(/^\[(\d+):(\d{2})\] (S\d+): /gm, (m, a, b, sp) => `Speaker ${sp.replace(/^S/, '')} 00:${a}:${b}\n`);
+  } else {
+    raw = fs.readFileSync(file, 'utf8');
+  }
   const lines = raw.split('\n');
   const re = /^Speaker\s+\d+\s+(\d{1,2}):(\d{2}):(\d{2})/;
   const segs = [];

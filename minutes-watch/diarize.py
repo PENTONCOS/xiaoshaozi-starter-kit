@@ -222,7 +222,8 @@ def from_artifacts(a):
     """妙记 artifacts.json 自带 Speaker 标签，直接提取，不需要音频。"""
     with open(a.from_artifacts, encoding="utf-8") as f:
         j = json.load(f)
-    txt = j.get("transcript") or ""
+    # artifacts 接口把逐字稿放在 data.transcript；老格式在顶层
+    txt = j.get("transcript") or (j.get("data") or {}).get("transcript") or ""
     blocks = re.split(r"\n(?=Speaker\s+\d+\s+\d)", txt)
     lines = []
     for b in blocks:
