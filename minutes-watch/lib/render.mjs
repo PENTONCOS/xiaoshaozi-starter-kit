@@ -226,8 +226,10 @@ export function toCard(m, opts = {}) {
   stats.push(tag(meta.label, 'turquoise'));
   els.push(mdBlock(stats.join(' ')));
 
-  if (m.caveat) {
-    els.push({ tag: 'note', elements: [{ tag: 'plain_text', content: esc(m.caveat).slice(0, 800) }] });
+  // 头部说明行：声纹确认结果 / 转录说明，独立成段放在元信息之后（11-03 版式）
+  const headNotes = [m.voiceNote, m.caveat].filter(Boolean);
+  if (headNotes.length) {
+    els.push({ tag: 'note', elements: [{ tag: 'plain_text', content: esc(headNotes.join('\n')).slice(0, 900) }] });
   }
 
   if (m.tldr?.length) {
@@ -277,7 +279,8 @@ export function toCard(m, opts = {}) {
     const lines = m.actions.map((a, i) => {
       const who = a.owner ? `**${esc(a.owner)}**` : '**TBD**';
       const due = a.due ? `　⏳ ${esc(a.due)}` : '';
-      return `${statusTag(a.status)} **${i + 1}.** ${esc(a.action)}\n${who}${due}`;
+      // 状态标签放行尾（11-03 版式），不挡在事项前面
+      return `**${i + 1}.** ${esc(a.action)}\n${who}${due}　${statusTag(a.status)}`;
     });
     els.push(mdBlock(lines.join('\n')));
   }
