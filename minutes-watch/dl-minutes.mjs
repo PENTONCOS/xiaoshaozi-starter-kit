@@ -4,7 +4,7 @@ import fs from 'node:fs';
 const [mt, out] = process.argv.slice(2);
 if (!mt || !out) { console.error('用法: node dl-minutes.mjs <minute_token> <out>'); process.exit(2); }
 const cfg = JSON.parse(fs.readFileSync(process.env.HOME + '/.openclaw/openclaw.json', 'utf8'));
-const app = cfg?.channels?.feishu?.accounts?.main;
+const app = cfg?.channels?.feishu?.accounts?.writer || cfg?.channels?.feishu?.accounts?.main;
 const appId = app.appId || app.app_id, appSecret = app.appSecret || app.app_secret;
 const t = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
