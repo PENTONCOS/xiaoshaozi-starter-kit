@@ -256,10 +256,14 @@ export function toCard(m, opts = {}) {
     els.push(sectionTitle('✅ 决议'));
     const lines = m.decisions.map((d, i) => {
       const text = typeof d === 'string' ? d : d.text;
-      const extra = typeof d === 'string' ? '' : [d.owner && `@${d.owner}`, d.note].filter(Boolean).join('　');
-      return `**${i + 1}.** ${esc(text)}${extra ? `\n　${esc(extra)}` : ''}`;
+      const note = typeof d === 'string' ? '' : d.note || '';
+      // 卡片只放时间戳，取证原话留在 md 归档，避免引用把卡片撑爆
+      const stamp = (note.match(/\d{1,2}:\d{2}(?::\d{2})?/g) || []).slice(0, 3);
+      const owner = typeof d === 'string' ? '' : d.owner ? `　@${d.owner}` : '';
+      const tail = stamp.length ? `\n　${stamp.map((x) => `[${x}]`).join(' ')}${owner}` : owner;
+      return `**${i + 1}.** ${esc(text)}${tail}`;
     });
-    els.push(mdBlock(lines.join('\n')));
+    els.push(mdBlock(lines.join('\n\n')));
   }
 
   if (m.reasoning?.length) {
