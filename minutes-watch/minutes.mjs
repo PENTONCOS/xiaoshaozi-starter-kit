@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { ROOT, HOME, sendApp, readJson } from './lib/config.mjs';
-import { tenantToken, userToken, http } from './lib/feishu.mjs';
+import { tenantToken, http } from './lib/feishu.mjs';
 
 const OUT_ROOT = path.join(HOME, 'sisyphus-output', 'meetings');
 const ASR = path.join(HOME, '.openclaw/agents/main/agent/workshop-skills/meeting-audio-transcription/scripts/transcribe.py');

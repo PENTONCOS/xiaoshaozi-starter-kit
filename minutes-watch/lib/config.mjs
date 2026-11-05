@@ -69,6 +69,16 @@ export function sendApp() {
   return { appId: acct.appId, appSecret: acct.appSecret, name: acct.name || 'Sisyphus' };
 }
 
+/** 云文档写入用应用：WPS/文档权限只授在「总管」应用上，纪要管道本身走少史应用 */
+export function docApp() {
+  const oc = readJson(OPENCLAW_CONFIG, {}) || {};
+  const c = readJson(CONFIG_PATH, {}) || {};
+  if (c.docApp && c.docApp.appId && c.docApp.appSecret) return c.docApp;
+  const acct = oc?.channels?.feishu?.accounts?.main;
+  if (!acct?.appId ||!acct?.appSecret) throw new Error('docApp 未配置');
+  return { appId: acct.appId, appSecret: acct.appSecret, name: acct.name || 'main' };
+}
+
 export function target() {
   const t = loadConfig().target || {};
   if (!t.chatId) throw new Error('config.json 缺 target.chatId');
