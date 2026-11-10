@@ -90,9 +90,10 @@ function findTranscript(dataFile, data) {
   for (const d of dirs) {
     if (!fs.existsSync(d)) continue;
     for (const f of fs.readdirSync(d)) {
-      if (f.endsWith('.transcript.txt') && (f.includes(stem) || stem.includes(f.replace(/\.transcript\.txt$/, '')))) {
-        cands.push(path.join(d, f));
-      }
+      if (!f.endsWith('.transcript.txt')) continue;
+      // 精确同名优先；stem 太短（如 "meeting"）时不做子串匹配，否则会串到别人的逐字稿
+      if (f === base + '.transcript.txt') { cands.unshift(path.join(d, f)); continue; }
+      if (stem.length >= 3 && f.includes(stem)) cands.push(path.join(d, f));
     }
   }
   return cands.find((p) => fs.existsSync(p)) || null;

@@ -139,7 +139,8 @@ function main() {
     if (!fs.existsSync(d)) continue;
     for (const f of fs.readdirSync(d)) {
       if (!f.endsWith('.transcript.txt')) continue;
-      if (f.includes(stem) || stem.includes(f.replace(/\.transcript\.txt$/, ''))) candidates.push(path.join(d, f));
+      if (f === base + '.transcript.txt') { candidates.unshift(path.join(d, f)); continue; }
+      if (stem.length >= 3 && f.includes(stem)) candidates.push(path.join(d, f));
     }
     for (const sub of fs.readdirSync(d)) {
       const sd = path.join(d, sub);
