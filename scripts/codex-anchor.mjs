@@ -289,11 +289,17 @@ function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null, resetCar
     `**5h 窗口**：已用 ${p ? p.used_percent : "?"}%｜${p ? `${fmtT(p.resets_at * 1000)} 重置（${remainStr(p.resets_at)}）` : "无数据"}`,
     `**周窗口**：已用 ${s ? s.used_percent : "?"}%｜${s ? `${fmtDT(s.resets_at * 1000)} 重置` : "无数据"}`,
     credits ? `**Credits**：${fmtCredits(credits)}${dCredStr}` : null,
-    resetCredits!= null? `**重置卡**：${CARD_SYM} ${resetCredits} 张` + (resetCardList ? "\n" + resetCardList : ""): null,
+    resetCredits!= null ? `**重置卡**：${CARD_SYM} ${resetCredits} 张` : null,
     peak != null ? `**上一窗口峰值**：${peak}%` : null,
     `快照：${fmtT(snapTs)}（${ageMin} 分钟前）${credits ? `｜汇率 1$=${USD_CNY.toFixed(3)}¥（${FX_ASOF}）` : ""}`,
   ].filter(Boolean);
-  return { header: { template: p && p.used_percent >= 80 ? "orange" : "green", title: { tag: "plain_text", content: title } }, elements: [{ tag: "markdown", content: lines.join("\n") }] };
+  const els = [{ tag: "markdown", content: lines.join("\n") }];
+  if (resetCardList) {
+    // 逐张过期时间单独成块：用 div + lark_md 分行，避免塞进同一个 markdown 块被挤压变形
+    els.push({ tag: "hr" });
+    els.push({ tag: "div", text: { tag: "lark_md", content: `**🎫 重置卡到期时间**\n${resetCardList}` } });
+  }
+  return { header: { template: p && p.used_percent >= 80 ? "orange" : "green", title: { tag: "plain_text", content: title } }, elements: els };
 }
 
 // ---------- opencodex real quota (zero-LLM API source) ----------
