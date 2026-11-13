@@ -280,7 +280,7 @@ function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null, resetCar
         .map((c, i) => {
           const d = (c.exp - now()) / 864e5;
           const left = d >= 1 ? `还剩 ${Math.ceil(d)} 天` : d > 0 ? "不足 1 天" : "已过期";
-          return `  ${i + 1}. ${fmtD(c.exp)} 到期（${left}）`;
+          return `• ${fmtD(c.exp)} 到期（${left}）`;
         })
         .join("\n");
     }
@@ -479,7 +479,7 @@ function usageEvents(st, snap, rcs = null) {
         .map((e, idx) => {
           const d = (e - now()) / 864e5;
           const left = d >= 1 ? `还剩 ${Math.ceil(d)} 天` : d > 0 ? "不足 1 天" : "已过期";
-          return `  ${idx + 1}. ${fmtD(e)} 到期（${left}）`;
+          return `• ${fmtD(e)} 到期（${left}）`;
         })
         .join("\n");
       out.push({
@@ -828,6 +828,20 @@ async function burnedTest() {
   await sendAlert(cw); log("alert sent(test):", cw.header.title.content);
 }
 
+// ---------- 手动推一次真卡（只读 quota + reset-credits，不发告警，不补锚）----------
+async function cardSendOnce() {
+  await refreshFx();
+  const snap = await fetchOcxQuota(false);
+  if (!snap || !snap.rl) { console.error("quota 读取失败，未推送"); process.exit(1); }
+  const rcs = await fetchResetCredits();
+  const rcCount = rcs && typeof rcs.available_count === "number" ? rcs.available_count : null;
+  const card = buildStatusCard(snap.rl, snap.ts || now(), loadState(), true, rcCount, rcs && rcs.credits ? rcs.credits : null);
+  card.header.title.content = "（测试）" + card.header.title.content.content;
+  await sendPush(card);
+  log("manual card sent");
+  console.log("sent");
+}
+
 // ---------- self-test: 打印状态卡 + 到期提醒卡（不发卡；另做真实路径只读校验）----------
 async function cardTest() {
   await refreshFx();
@@ -890,6 +904,7 @@ try {
   else if (process.env.PROBE_TEST === "1") console.log("probe:", probeOnce(), "marker:", BACKGROUND_CALLS);
   else if (process.env.CREDIT_TEST === "1") await creditTest();
   else if (process.env.CARD_TEST === "1") await cardTest();
+  else if (process.env.CARD_SEND === "1") await cardSendOnce(); // 手动推一次真卡（只读，不补锚）
   else if (process.env.BURN_TEST === "1") await burnedTest();
   else if (process.env.LEVEL_TEST === "1") await levelTest();
   else if (mode === "monitor") await monitor();
