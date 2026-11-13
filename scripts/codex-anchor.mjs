@@ -254,7 +254,7 @@ async function refreshFx() {
 }
 
 // 状态卡（原日报卡格式，2026-10-13 并入自动补锚卡；锚定/事件复用同一格式）
-function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
+function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null, resetCards = null) {
   const p = rl.primary, s = rl.secondary;
   const ageMin = Math.max(0, Math.round((now() - snapTs) / 6e4));
   const credits = rl.credits?.has_credits ? Number(rl.credits.balance).toFixed(2) : null;
@@ -268,11 +268,28 @@ function buildStatusCard(rl, snapTs, st, anchored, resetCredits = null) {
   const prevPeak = Object.entries(st.peaks).filter(([k]) => k !== curKey).sort((a, b) => Number(b[0].split("|")[1]) - Number(a[0].split("|")[1]))[0];
   const peak = prevPeak ? prevPeak[1] : null;
   const title = anchored ? "⚓ Codex 窗口已锚定（自动补锚）" : "⏱ Codex 窗口进行中";
+  // 逐张列出重置卡到期时间（按过期时间升序）
+  let resetCardList = null;
+  if (Array.isArray(resetCards) && resetCards.length) {
+    const items = resetCards
+      .map((c) => ({ exp: Date.parse(c && c.expires_at) }))
+      .filter((c) => Number.isFinite(c.exp))
+      .sort((a, b) => a.exp - b.exp);
+    if (items.length) {
+      resetCardList = items
+        .map((c, i) => {
+          const d = (c.exp - now()) / 864e5;
+          const left = d >= 1 ? `还剩 ${Math.ceil(d)} 天` : d > 0 ? "不足 1 天" : "已过期";
+          return `  ${i + 1}. ${fmtD(c.exp)} 到期（${left}）`;
+        })
+        .join("\n");
+    }
+  }
   const lines = [
     `**5h 窗口**：已用 ${p ? p.used_percent : "?"}%｜${p ? `${fmtT(p.resets_at * 1000)} 重置（${remainStr(p.resets_at)}）` : "无数据"}`,
     `**周窗口**：已用 ${s ? s.used_percent : "?"}%｜${s ? `${fmtDT(s.resets_at * 1000)} 重置` : "无数据"}`,
     credits ? `**Credits**：${fmtCredits(credits)}${dCredStr}` : null,
-    resetCredits != null ? `**重置卡**：${CARD_SYM} ${resetCredits} 张` : null,
+    resetCredits!= null? `**重置卡**：${CARD_SYM} ${resetCredits} 张` + (resetCardList ? "\n" + resetCardList : ""): null,
     peak != null ? `**上一窗口峰值**：${peak}%` : null,
     `快照：${fmtT(snapTs)}（${ageMin} 分钟前）${credits ? `｜汇率 1$=${USD_CNY.toFixed(3)}¥（${FX_ASOF}）` : ""}`,
   ].filter(Boolean);
@@ -444,7 +461,27 @@ function usageEvents(st, snap, rcs = null) {
         });
       }
       st.seenResetCredits = rc;
-    } else if (rc > st.seenResetCredits) st.seenResetCredits = rc; // 新发卡：静默同步
+    } else if (rc > st.seenResetCredits) {
+      // 新增/补发重置卡：推送一条（2026-11-13 用户要求，原先静默同步）
+      const added = rc - st.seenResetCredits;
+      const addedList = (exps || [])
+        .map((e) => Number(e))
+        .filter(Number.isFinite)
+        .filter((e) => !(st.creditExps || []).includes(e) || !(st.creditExps || []).length)
+        .sort((a, b) => a - b);
+      const lines2 = addedList
+        .map((e, idx) => {
+          const d = (e - now()) / 864e5;
+          const left = d >= 1 ? `还剩 ${Math.ceil(d)} 天` : d > 0 ? "不足 1 天" : "已过期";
+          return `  ${idx + 1}. ${fmtD(e)} 到期（${left}）`;
+        })
+        .join("\n");
+      out.push({
+        title: "🎫 Codex 重置卡 +" + added,
+        body: `新增 **${added}** 张重置卡｜当前共 **${CARD_SYM} ${rc}** 张` + (lines2 ? "\n" + lines2 : ""),
+      });
+      st.seenResetCredits = rc;
+    }
   }
   if (exps) st.creditExps = exps;
   const cr = snap.rl.credits?.has_credits ? Number(snap.rl.credits.balance) : null;
@@ -661,7 +698,11 @@ async function monitor() {
   recordSample(st, snap);
   // 补锚成功 → 推状态卡（原日报卡格式）到通知群
   if (anchored) {
-    await sendPush(buildStatusCard(snap.rl, snap.ts, st, true, snap.resetCredits ?? null));
+    const rcsForCard = await fetchResetCredits();
+    const rcCount = rcsForCard && typeof rcsForCard.available_count === "number"
+      ? rcsForCard.available_count
+      : (snap.resetCredits != null ? snap.resetCredits : null);
+    await sendPush(buildStatusCard(snap.rl, snap.ts, st, true, rcCount, rcsForCard && rcsForCard.credits ? rcsForCard.credits : null));
     log("anchor status card sent");
   }
   // 重置卡：到期前 1 小时自动兑现（零 LLM，只调 relay 的 consume 接口）
@@ -795,7 +836,7 @@ async function cardTest() {
   };
   const st = { dayCredits: {}, peaks: { "w|1000000000": 53 }, samples: [] };
   console.log("--- status card (auto-anchor) ---");
-  console.log(JSON.stringify(buildStatusCard(rl, now(), st, true, 3), null, 2));
+  console.log(JSON.stringify(buildStatusCard(rl, now(), st, true, real?.available_count ?? 3, real?.credits || null), null, 2));
   const days = Number(process.env.CREDIT_TEST_DAYS || 5.2);
   console.log("--- expiry reminder card (synthetic " + days + "d) ---");
   console.log(JSON.stringify(buildExpiryCard({ exp: now() + days * 864e5, daysLeft: days }, 3), null, 2));
