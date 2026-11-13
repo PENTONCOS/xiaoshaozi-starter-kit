@@ -836,7 +836,7 @@ async function cardSendOnce() {
   const rcs = await fetchResetCredits();
   const rcCount = rcs && typeof rcs.available_count === "number" ? rcs.available_count : null;
   const card = buildStatusCard(snap.rl, snap.ts || now(), loadState(), true, rcCount, rcs && rcs.credits ? rcs.credits : null);
-  card.header.title.content = "（测试）" + card.header.title.content.content;
+  card.header.title.content.content = "（测试）" + card.header.title.content.content;
   await sendPush(card);
   log("manual card sent");
   console.log("sent");
