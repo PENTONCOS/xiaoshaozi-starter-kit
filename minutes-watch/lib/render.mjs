@@ -23,6 +23,13 @@ export function tag(text, color = 'neutral') {
   return `<text_tag color='${color}'>${esc(text)}</text_tag>`;
 }
 
+/** 待办字段名容错：管线/模型可能写 action、text、task 或 title（11-19 wanci 场写 text，渲染出 undefined） */
+function actionText(a) {
+  if (!a) return '';
+  if (typeof a === 'string') return a.trim();
+  return String(a.action || a.text || a.task || a.title || '').trim();
+}
+
 const STATUS_COLOR = {
   open: 'orange',
   doing: 'blue',
@@ -143,7 +150,7 @@ export function toMarkdown(m) {
     out.push('| # | 事项 | 负责人 | 时间 | 状态 |');
     out.push('|---|---|---|---|---|');
     m.actions.forEach((a, i) => {
-      out.push(`| ${i + 1} | ${a.action} | ${a.owner || 'TBD'} | ${a.due || 'TBD'} | ${a.status || 'open'} |`);
+      out.push(`| ${i + 1} | ${actionText(a) || 'TBD'} | ${a.owner || 'TBD'} | ${a.due || 'TBD'} | ${a.status || 'open'} |`);
     });
     out.push('');
   }
@@ -277,10 +284,11 @@ export function toCard(m, opts = {}) {
     els.push(hr());
     els.push(sectionTitle('📌 待办'));
     const lines = m.actions.map((a, i) => {
-      const who = a.owner ? `**${esc(a.owner)}**` : '**TBD**';
-      const due = a.due ? `　⏳ ${esc(a.due)}` : '';
+      const what = actionText(a) || 'TBD';
+      const who = a.owner? `**${esc(a.owner)}**`: '**TBD**';
+      const due = a.due? `　⏳ ${esc(a.due)}`: '';
       // 状态标签放行尾（11-03 版式），不挡在事项前面
-      return `**${i + 1}.** ${esc(a.action)}\n${who}${due}　${statusTag(a.status)}`;
+      return `**${i + 1}.** ${esc(what)}\n${who}${due}　${statusTag(a.status)}`;
     });
     els.push(mdBlock(lines.join('\n')));
   }

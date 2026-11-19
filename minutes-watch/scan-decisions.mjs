@@ -166,8 +166,10 @@ const results = merged.map((c) => {
     if (score > bestScore) best = { covD, covC, shared, idx: i };
   });
   const nearAnchor = decAnchors.find((a) => Math.abs(a.t - c.t) <= 120);
-  const lexical = best.covD >= 0.30 || best.shared >= 2;
-  const covered = Boolean(nearAnchor) || lexical;
+  const lexCovered = best.covD >= 0.30 || best.shared >= 2;
+  // 11-19：`lexical` 既是布尔又是匹配详情对象，truthy 后 via 永远走 'lexical' 分支 → 时间戳锚点覆盖
+  // 也会被标成 via:'lexical' 且 ratio 取词面值（实测 5 条 anchored 全标错）。布尔值单独命名。
+  const covered = Boolean(nearAnchor) || lexCovered;
 
   let ign = null;
   if (!covered) {
