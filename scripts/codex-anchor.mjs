@@ -208,16 +208,33 @@ function burnTailWeekly(usedPct, jump, daysLeft, resetTs) {
   const wProj = Math.min(100, Math.round(usedPct + wPerDay * daysLeft));
   return "按此速率到重置预计 **" + wProj + "%**（不会用光）";
 }
+// 档位卡也要给「预计何时用光」：阈值卡原来只有用量，ETA 只在燃烧卡里（2026-11-24 用户要求补上）
+function eta5h(st, p, usedPct) {
+  const key = st.win5?.key || `w|${p.resets_at}`;
+  const recent = st.samples.filter((x) => x.t >= now() - BURN_WINDOW_MIN * 6e4 && x.p5 != null && (x.k ? x.k === key : x.w5 === p.resets_at));
+  if (recent.length < 2) return "样本不足，暂无法外推（窗口刚重置或脚本刚启动）";
+  const jump = Math.max(0, recent[recent.length - 1].p5 - recent[0].p5);
+  const minsLeft = (p.resets_at * 1000 - now()) / 6e4;
+  return `按近 ${BURN_WINDOW_MIN} 分钟速度（+${Math.round(jump)}%）：` + burnTail5h(usedPct, jump, minsLeft, p.resets_at * 1000);
+}
+function etaWeek(st, sw, jumpWindowH = 3) {
+  const wkey = st.winwk?.key || "wk|" + sw.resets_at;
+  const recent = st.samples.filter((x) => x.t >= now() - jumpWindowH * 3.6e6 && x.pw != null && (x.kw ? x.kw === wkey : x.ww === sw.resets_at));
+  if (recent.length < 2) return "样本不足，暂无法外推（本周刚重置或脚本刚启动）";
+  const jump = Math.max(0, recent[recent.length - 1].pw - recent[0].pw);
+  const daysLeft = Math.max(0.01, (sw.resets_at * 1000 - now()) / 864e5);
+  return `按近 ${jumpWindowH} 小时速度（+${Math.round(jump)}%）：` + burnTailWeekly(sw.used_percent, jump, daysLeft, sw.resets_at * 1000);
+}
 // 档位卡（5h/周）：标题=实际用量，档位挪进正文——避免「窗口 80%」被误读成用量只有 80%（2026-10-13 用户反馈歧义）
-function levelCard5h(lvl, usedPct, resetSec, weeklyPct, test = false) {
+function levelCard5h(lvl, usedPct, resetSec, weeklyPct, test = false, eta = null) {
   const tpl = lvl >= 95 ? ["red", "🔴"] : lvl >= 80 ? ["orange", "🟠"] : ["yellow", "🟡"];
   const kind = lvl === PRE_WARN_PP ? "提前哨线" : "告警线";
   const base = `5h 窗口已用 **${usedPct}%**（${fmtT(resetSec * 1000)} 重置，${remainStr(resetSec)}）`;
-  return { header: { template: tpl[0], title: { tag: "plain_text", content: (test ? "【测试】" : "") + `${tpl[1]} Codex 5h 已用 ${usedPct}%` } }, elements: [{ tag: "markdown", content: `${base}\n已越过 **${lvl}%** ${kind}\n周窗口已用 **${weeklyPct ?? "?"}%**` }] };
+  return { header: { template: tpl[0], title: { tag: "plain_text", content: (test ? "【测试】" : "") + `${tpl[1]}⏱ Codex 5h 窗口 · 已用 ${usedPct}%` } }, elements: [{ tag: "markdown", content: `**⏱ 5 小时窗口**（每 5 小时重置）\n${base}\n已越过 **${lvl}%** ${kind}${eta ? `\n⏳ ${eta}` : ""}\n—— 周窗口是另一条线：已用 **${weeklyPct ?? "?"}%**` }] };
 }
-function levelCardWeek(lvl, usedPct, resetSec, p5, test = false) {
+function levelCardWeek(lvl, usedPct, resetSec, p5, test = false, eta = null) {
   const tpl = lvl >= 90 ? ["red", "🔴"] : lvl >= 75 ? ["orange", "🟠"] : ["yellow", "🟡"];
-  return { header: { template: tpl[0], title: { tag: "plain_text", content: (test ? "【测试】" : "") + `${tpl[1]} Codex 周额度已用 ${usedPct}%` } }, elements: [{ tag: "markdown", content: `周窗口已用 **${usedPct}%**（${fmtDT(resetSec * 1000)} 重置）\n已越过 **${lvl}%** 告警线\n5h 窗口已用 ${p5}%` }] };
+  return { header: { template: tpl[0], title: { tag: "plain_text", content: (test ? "【测试】" : "") + `${tpl[1]}📅 Codex 周窗口 · 已用 ${usedPct}%` } }, elements: [{ tag: "markdown", content: `**📅 周窗口**（每周重置一次）\n已用 **${usedPct}%**（${fmtDT(resetSec * 1000)} 重置）\n已越过 **${lvl}%** 告警线${eta ? `\n⏳ ${eta}` : ""}\n—— 5h 窗口是另一条线：已用 ${p5}%` }] };
 }
 // Credits 单位是「积分」，不是美元（2026-10-14 用户定案：500 积分 ≈ 20 美元 → 1 美元 ≈ 25 积分）。
 // 三个单位均用符号：积分 💎 / 美刀 $ / 人民币 ¥（人民币按实时汇率，缓存 12h）。
@@ -728,7 +745,7 @@ async function monitor() {
   const base = `5h 窗口已用 **${p.used_percent}%**（${fmtT(p.resets_at * 1000)} 重置，${remainStr(p.resets_at)}）`;
   const mark5h = (lv) => { for (const v of [PRE_WARN_PP, 80, 95]) if (v <= lv && !alerted.includes(String(v))) alerted.push(String(v)); }; // 报高级别时把更低的闸一并标记，避免跳档后补报一条
   for (const lv of [95, 80, PRE_WARN_PP]) { // 高级别优先；标题用实际用量，档位写正文
-    if (p.used_percent >= lv && !alerted.includes(String(lv))) { mark5h(lv); card = levelCard5h(lv, p.used_percent, p.resets_at, snap.rl.secondary?.used_percent); break; }
+    if (p.used_percent >= lv && !alerted.includes(String(lv))) { mark5h(lv); card = levelCard5h(lv, p.used_percent, p.resets_at, snap.rl.secondary?.used_percent, false, eta5h(st, p, p.used_percent)); break; }
   }
 
   if (!card && now() - st.burnLast > BURN_COOLDOWN_MS) {
@@ -740,7 +757,7 @@ async function monitor() {
         st.burnLast = now();
         const minsLeft = (p.resets_at * 1000 - now()) / 6e4;
         const tail = burnTail5h(last.p5, jump, minsLeft, p.resets_at * 1000);
-        card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 消耗过快" } }, elements: [{ tag: "markdown", content: `${base}\n近 ${BURN_WINDOW_MIN} 分钟涨 **${jump}%**｜${tail}` }] };
+        card = { header: { template: "orange", title: { tag: "plain_text", content: "⏱🔥 Codex 5h 消耗过快" } }, elements: [{ tag: "markdown", content: `${base}\n近 ${BURN_WINDOW_MIN} 分钟涨 **${jump}%**｜${tail}` }] };
       }
     }
   }
@@ -757,7 +774,7 @@ async function monitor() {
     for (const gate of [[90, "red", "🔴"], [75, "orange", "🟠"], [50, "yellow", "🟡"]]) {
       if (sw.used_percent >= gate[0] && !wAlerted.includes(String(gate[0]))) {
         wAlerted.push(String(gate[0]));
-        card = levelCardWeek(gate[0], sw.used_percent, sw.resets_at, p.used_percent);
+        card = levelCardWeek(gate[0], sw.used_percent, sw.resets_at, p.used_percent, false, etaWeek(st, sw));
         break;
       }
     }
@@ -769,7 +786,7 @@ async function monitor() {
           st.wkBurnLast = now();
           const wDaysLeft = Math.max(0.01, (sw.resets_at * 1000 - now()) / 864e5);
           const wTail = burnTailWeekly(sw.used_percent, wJump, wDaysLeft, sw.resets_at * 1000);
-          card = { header: { template: "orange", title: { tag: "plain_text", content: "🔥 Codex 周额度消耗过快" } }, elements: [{ tag: "markdown", content: wBase + "\n近 3 小时涨 **" + wJump + "%**｜" + wTail }] };
+          card = { header: { template: "orange", title: { tag: "plain_text", content: "📅🔥 Codex 周窗口消耗过快" } }, elements: [{ tag: "markdown", content: wBase + "\n近 3 小时涨 **" + wJump + "%**｜" + wTail }] };
         }
       }
     }
@@ -788,7 +805,10 @@ async function monitor() {
 async function levelTest() {
   const reset5 = Math.floor((now() + 16 * 6e4) / 1000);
   const resetw = Math.floor((now() + 4.2 * 864e5) / 1000);
-  for (const c of [levelCard5h(80, 91, reset5, 14, true), levelCardWeek(50, 53, resetw, 91, true)]) {
+  const st = loadState();
+  const p5 = { resets_at: reset5, used_percent: 91 };
+  const sw = { resets_at: resetw, used_percent: 53 };
+  for (const c of [levelCard5h(80, 91, reset5, 14, true, eta5h(st, p5, 91)), levelCardWeek(50, 53, resetw, 91, true, etaWeek(st, sw))]) {
     await sendAlert(c); log("alert sent(test):", c.header.title.content);
   }
 }
@@ -817,14 +837,14 @@ async function burnedTest() {
   const ml = Number(process.env.BURN_TEST_MINSLEFT || 200);
   const reset5 = now() + ml * 6e4;
   const base5 = `5h 窗口已用 **${u5}%**（${fmtT(reset5)} 重置，${remainStr(Math.floor(reset5 / 1000))}）`;
-  const c5 = { header: { template: "orange", title: { tag: "plain_text", content: "【测试】🔥 Codex 消耗过快" } }, elements: [{ tag: "markdown", content: `${base5}\n近 ${BURN_WINDOW_MIN} 分钟涨 **${j5}%**｜${burnTail5h(u5, j5, ml, reset5)}` }] };
+  const c5 = { header: { template: "orange", title: { tag: "plain_text", content: "【测试】⏱🔥 Codex 5h 消耗过快" } }, elements: [{ tag: "markdown", content: `${base5}\n近 ${BURN_WINDOW_MIN} 分钟涨 **${j5}%**｜${burnTail5h(u5, j5, ml, reset5)}` }] };
   await sendAlert(c5); log("alert sent(test):", c5.header.title.content);
 
   const uw = Number(process.env.BURN_TEST_WUSED || 21);
   const jw = Number(process.env.BURN_TEST_WJUMP || 12);
   const dl = Number(process.env.BURN_TEST_WDAYSLEFT || 5.27);
   const resetw = now() + dl * 864e5;
-  const cw = { header: { template: "orange", title: { tag: "plain_text", content: "【测试】🔥 Codex 周额度消耗过快" } }, elements: [{ tag: "markdown", content: `周窗口已用 **${uw}%**（${fmtDT(resetw)} 重置）\n近 3 小时涨 **${jw}%**｜${burnTailWeekly(uw, jw, dl, resetw)}` }] };
+  const cw = { header: { template: "orange", title: { tag: "plain_text", content: "【测试】📅🔥 Codex 周窗口消耗过快" } }, elements: [{ tag: "markdown", content: `周窗口已用 **${uw}%**（${fmtDT(resetw)} 重置）\n近 3 小时涨 **${jw}%**｜${burnTailWeekly(uw, jw, dl, resetw)}` }] };
   await sendAlert(cw); log("alert sent(test):", cw.header.title.content);
 }
 
