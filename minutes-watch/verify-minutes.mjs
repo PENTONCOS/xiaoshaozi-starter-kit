@@ -40,7 +40,13 @@ function loadTranscript(file) {
   if (spk !== file && fs.existsSync(spk)) {
     const body = fs.readFileSync(spk, 'utf8').split('\n').filter((l) => !l.startsWith('#')).join('\n');
     // [mm:ss] S1: 文本 → 伪 Speaker 头，复用同一套解析（缺小时位，按 00:mm:ss 处理）
-    raw = body.replace(/^\[(\d+):(\d{2})\] (S\d+): /gm, (m, a, b, sp) => `Speaker ${sp.replace(/^S/, '')} 00:${a}:${b}\n`);
+    // [mm:ss] 的分钟位可能超过 99（长会议），必须换成 hh:mm:ss，否则 100 分钟后的段落会被丢掉
+    raw = body.replace(/^\[(\d+):(\d{2})\] (S\d+): /gm, (m, a, b, sp) => {
+      const mins = Number(a);
+      const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+      const mm = String(mins % 60).padStart(2, '0');
+      return `Speaker ${sp.replace(/^S/, '')} ${hh}:${mm}:${b}\n`;
+    });
   } else {
     raw = fs.readFileSync(file, 'utf8');
   }
