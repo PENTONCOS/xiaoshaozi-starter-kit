@@ -169,7 +169,14 @@ export function toMarkdown(m) {
   if (m.risks?.length) {
     out.push('## 风险与未决');
     out.push('');
-    for (const r of m.risks) out.push(`- ${r}`);
+    // risks 可能是字符串，也可能是 {text, level} 对象（structure 的 decisions 同款）。
+    // 直接插值对象会写出 [object Object]，取 text 正文，level 作为前缀标注。
+    for (const r of m.risks) {
+      const body = typeof r === 'string' ? r : (r?.text ?? r?.content ?? r?.title ?? '');
+      if (!body) continue;
+      const lv = typeof r === 'object' && r?.level ? `[${r.level}] ` : '';
+      out.push(`- ${lv}${body}`);
+    }
     out.push('');
   }
 
@@ -306,7 +313,11 @@ export function toCard(m, opts = {}) {
   if (m.risks?.length) {
     els.push(hr());
     els.push(sectionTitle('⚠️ 风险与未决'));
-    els.push(mdBlock(m.risks.map((r) => `· ${esc(r)}`).join('\n')));
+    els.push(mdBlock(m.risks.map((r) => {
+      const body = typeof r === 'string' ? r : (r?.text ?? r?.content ?? r?.title ?? '');
+      const lv = typeof r === 'object' && r?.level ? `[${r.level}] ` : '';
+      return body ? `· ${lv}${esc(body)}` : '';
+    }).filter(Boolean).join('\n')));
   }
 
   if (m.analysis?.length) {
